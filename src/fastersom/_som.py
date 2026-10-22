@@ -51,8 +51,6 @@ def _is_available(device: torch.device) -> bool:
 class SOM:
     """Batch self-organising map on a rectangular grid with a gaussian neighbourhood.
 
-    The defaults reproduce the maps of spatiomic's ``so.dimension.som``.
-
     Args:
         n_rows: Number of grid rows.
         n_cols: Number of grid columns.
