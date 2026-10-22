@@ -18,11 +18,13 @@ References:
 """
 
 from math import ceil, isfinite
+from typing import Literal, overload
 
 import numpy as np
 import torch
+from numpy.typing import ArrayLike
 
-_METRICS = ("euclidean", "cosine")
+_METRICS = ("euclidean", "manhattan", "cosine", "correlation")
 _INITS = ("random", "sample")
 
 
@@ -38,6 +40,14 @@ def _default_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _is_available(device: torch.device) -> bool:
+    if device.type == "cuda":
+        return torch.cuda.is_available() and (device.index or 0) < torch.cuda.device_count()
+    if device.type == "mps":
+        return torch.backends.mps.is_available()
+    return device.type == "cpu"
+
+
 class SOM:
     """Batch self-organising map on a rectangular grid with a gaussian neighbourhood.
 
@@ -46,15 +56,22 @@ class SOM:
     Args:
         n_rows: Number of grid rows.
         n_cols: Number of grid columns.
-        n_epochs: Number of epochs; each makes one weight update from all samples.
+        n_epochs: Number of epochs; each makes one weight update from all samples. With 0, fit keeps the initial
+            weights.
         sigma_initial: Initial gaussian neighbourhood width in grid units. Defaults to
             ceil(min(n_rows, n_cols) / 2) / 2.
         sigma_final: Width the exponential schedule decays towards (reached at t = n_epochs), > 0. Defaults to
             0.1 * sigma_initial.
         init: ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
-            normalises them to unit length; ``"sample"`` uses randomly chosen samples (non-zero ones for cosine).
-        metric: ``"euclidean"`` or ``"cosine"``. Under cosine, zero-norm samples have no BMU: they get label -1, are
-            excluded from the update and the error measures, and have cosine distance 1 to every node.
+            normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
+            shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. to
+            continue training from another map's ``weights_``.
+        metric: ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
+            (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
+            the nodes to the neighbourhood-weighted mean of the raw samples (not the median for manhattan, nor the
+            centred samples for correlation). Zero-norm samples under cosine and constant samples under correlation
+            have no BMU: they get label -1, are excluded from the update and the error measures, and have distance 1
+            to every node in transform.
         random_state: Seed for the initialisation.
         device: Torch device. Defaults to cuda, then mps, then cpu.
         batch_size: Samples processed at once in BMU search, aggregation, predict and transform. Affects memory
@@ -65,7 +82,7 @@ class SOM:
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
-        labels_: BMU of every training sample under the final weights.
+        labels_: BMU of every training sample under the final weights. Not set by from_weights.
         n_features_in_: Number of features seen in fit.
     """
 
@@ -76,7 +93,7 @@ class SOM:
         n_epochs: int = 10,
         sigma_initial: float | None = None,
         sigma_final: float | None = None,
-        init: str = "random",
+        init: str | ArrayLike | torch.Tensor = "random",
         metric: str = "euclidean",
         random_state: int | None = None,
         device: str | torch.device | None = None,
@@ -93,17 +110,59 @@ class SOM:
         self.device = device
         self.batch_size = batch_size
 
-    def _setup(self) -> None:
+    @classmethod
+    def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
+        """Returns a fitted map with the given node weights, without training data.
+
+        The map behaves like ``SOM(n_rows, n_cols, n_epochs=0, init=weights, **kwargs).fit(X)``, except that
+        ``labels_`` is not set because there are no training samples. ``fit`` on it trains ``n_epochs`` (default 0)
+        epochs starting from ``weights``.
+
+        Args:
+            weights: Node weights, shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features).
+            n_rows: Number of grid rows.
+            n_cols: Number of grid columns.
+            **kwargs: Further constructor parameters, e.g. ``metric`` or ``device``.
+
+        Returns:
+            The fitted map.
+        """
+        som = cls(n_rows, n_cols, init=weights, **{"n_epochs": 0, **kwargs})
+        som._setup()
+        som._set_weights(som._given_weights())
+        return som
+
+    def __getstate__(self) -> dict:
+        """Keeps the parameters and numpy fitted attributes only, so the pickle does not depend on the device."""
+        state = {key: value for key, value in self.__dict__.items() if not key.startswith("_")}
+        if isinstance(self.init, torch.Tensor):
+            state["init"] = self.init.cpu()
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restores a pickled map on the configured device if available, else on the default device.
+
+        Availability is checked for cpu, cuda and mps; maps configured for other device types load on the default one.
+        A later fit uses the configured device, like any fit.
+        """
+        self.__dict__.update(state)
+        if hasattr(self, "weights_"):
+            self._setup(fall_back=True)
+            self._set_weights(torch.as_tensor(self.weights_, device=self._device))
+
+    def _setup(self, fall_back: bool = False) -> None:
         if self.metric not in _METRICS:
             raise ValueError(f"metric must be one of {_METRICS}, got {self.metric!r}")
-        if self.init not in _INITS:
-            raise ValueError(f"init must be one of {_INITS}, got {self.init!r}")
-        for name in ("n_rows", "n_cols", "n_epochs"):
-            if not _is_int(getattr(self, name), 1):
-                raise ValueError(f"{name} must be an integer >= 1, got {getattr(self, name)!r}")
+        if isinstance(self.init, str) and self.init not in _INITS:
+            raise ValueError(f"init must be one of {_INITS} or an array of weights, got {self.init!r}")
+        for name, minimum in (("n_rows", 1), ("n_cols", 1), ("n_epochs", 0)):
+            if not _is_int(getattr(self, name), minimum):
+                raise ValueError(f"{name} must be an integer >= {minimum}, got {getattr(self, name)!r}")
         if self.batch_size is not None and not _is_int(self.batch_size, 1):
             raise ValueError(f"batch_size must be None or an integer >= 1, got {self.batch_size!r}")
         self._device = torch.device(self.device) if self.device is not None else _default_device()
+        if fall_back and not _is_available(self._device):
+            self._device = _default_device()
         self._batch_size = self.batch_size or (8192 if self._device.type == "cpu" else 1 << 16)
         self._sigma0 = ceil(min(self.n_rows, self.n_cols) / 2) / 2 if self.sigma_initial is None else self.sigma_initial
         self._sigma1 = 0.1 * self._sigma0 if self.sigma_final is None else self.sigma_final
@@ -113,12 +172,15 @@ class SOM:
         self._coords = self._coords.to(self._device, torch.float32)
         self._grid_sq_dist = torch.cdist(self._coords, self._coords) ** 2
 
-    def _check_X(self, X) -> torch.Tensor:
-        data = torch.as_tensor(
+    def _as_tensor(self, X: ArrayLike | torch.Tensor) -> torch.Tensor:
+        return torch.as_tensor(
             X.detach() if isinstance(X, torch.Tensor) else np.ascontiguousarray(X),
             dtype=torch.float32,
             device=self._device,
         )
+
+    def _check_X(self, X: ArrayLike | torch.Tensor) -> torch.Tensor:
+        data = self._as_tensor(X)
         if data.ndim < 2 or data.numel() == 0:
             raise ValueError(f"X must have shape (n_samples, n_features) or (..., n_features), got {tuple(data.shape)}")
         data = data.reshape(-1, data.shape[-1])
@@ -132,7 +194,30 @@ class SOM:
         if not hasattr(self, "weights_"):
             raise RuntimeError("This SOM instance is not fitted yet, call fit() first")
 
+    def _set_weights(self, weights: torch.Tensor) -> None:
+        self._weights = weights
+        self.weights_ = weights.cpu().numpy()
+        self.n_features_in_ = weights.shape[1]
+
+    def _given_weights(self) -> torch.Tensor:
+        """The weights given as init, as a (n_nodes, n_features) copy on the device."""
+        weights = self._as_tensor(self.init)
+        n_nodes = self.n_rows * self.n_cols
+        if weights.shape[:-1] not in ((n_nodes,), (self.n_rows, self.n_cols)) or weights.shape[-1] == 0:
+            raise ValueError(
+                f"init must have shape ({n_nodes}, n_features) or ({self.n_rows}, {self.n_cols}, n_features), "
+                f"got {tuple(weights.shape)}"
+            )
+        if not torch.isfinite(weights).all():
+            raise ValueError("init contains NaN or infinite values")
+        return weights.reshape(n_nodes, -1).clone()
+
     def _init_weights(self, data: torch.Tensor) -> torch.Tensor:
+        if not isinstance(self.init, str):
+            weights = self._given_weights()
+            if weights.shape[1] != data.shape[1]:
+                raise ValueError(f"X has {data.shape[1]} features, but init has {weights.shape[1]}")
+            return weights
         rng = np.random.RandomState(self.random_state)
         n_nodes = self.n_rows * self.n_cols
         if self.init == "random":
@@ -140,28 +225,73 @@ class SOM:
             weights /= np.linalg.norm(weights, axis=-1, keepdims=True)
             return torch.as_tensor(weights.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
         candidates = torch.arange(len(data), device=self._device)
-        if self.metric == "cosine":
-            candidates = candidates[data.norm(dim=1) > 0]
+        has_bmu = self._has_bmu(data)
+        if has_bmu is not None:
+            candidates = candidates[has_bmu]
         if len(candidates) == 0:
-            raise ValueError("init='sample' with metric='cosine' needs at least one non-zero sample")
+            raise ValueError(
+                f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU "
+                "(non-zero for cosine, non-constant for correlation)"
+            )
         picks = rng.choice(len(candidates), n_nodes, replace=len(candidates) < n_nodes)
         return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
 
+    def _has_bmu(self, data: torch.Tensor) -> torch.Tensor | None:
+        """Mask of samples with a BMU: non-zero ones (cosine), non-constant ones (correlation); None if all."""
+        if self.metric == "cosine":
+            return data.norm(dim=1) > 0
+        if self.metric == "correlation":
+            return data.amax(1) > data.amin(1)
+        return None
+
+    def _centre(self, x: torch.Tensor) -> torch.Tensor:
+        """Centres the rows over the features under correlation, the cosine metric of centred vectors."""
+        return x - x.mean(1, keepdim=True) if self.metric == "correlation" else x
+
     def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Per-node score to minimise: ||w||^2 - 2 x.w (euclidean, ||x||^2 dropped) or -x.w / ||w|| (cosine)."""
+        """Per-node score to minimise.
+
+        ||w||^2 - 2 x.w (euclidean, ||x||^2 dropped), the L1 distance (manhattan) or -x.w / ||w|| of the (for
+        correlation centred) vectors (cosine, correlation).
+        """
         if self.metric == "euclidean":
             return torch.addmm((weights**2).sum(1), batch, weights.T, alpha=-2)
-        return -(batch @ (weights / weights.norm(dim=1, keepdim=True).clamp_min(1e-12)).T)
+        if self.metric == "manhattan":
+            return torch.cdist(batch, weights, p=1)
+        weights = self._centre(weights)
+        return -(self._centre(batch) @ (weights / weights.norm(dim=1, keepdim=True).clamp_min(1e-12)).T)
 
-    def _bmus(self, data: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """BMU per sample; -1 for zero-norm samples under the cosine metric."""
-        bmus = torch.cat([self._scores(batch, weights).argmin(1) for batch in data.split(self._batch_size)])
-        if self.metric == "cosine":
-            bmus[data.norm(dim=1) == 0] = -1
-        return bmus
+    def _score_distances(self, batch: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        """Distances from the scores of any number of nodes per sample, for every metric but euclidean."""
+        if self.metric == "manhattan":
+            return scores
+        return (1 + scores / self._centre(batch).norm(dim=1, keepdim=True)).clamp(0, 2)
 
-    def fit(self, X, y=None) -> "SOM":
-        """Fits the map from a fresh initialisation.
+    def _bmus(
+        self, data: torch.Tensor, weights: torch.Tensor, return_distance: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """BMU and, if return_distance, distance to it per sample; -1 and NaN for samples without a BMU."""
+        bmus, distances = [], []
+        for batch in data.split(self._batch_size):
+            score, bmu = self._scores(batch, weights).min(1)
+            bmus.append(bmu)
+            if not return_distance:
+                continue
+            if self.metric == "euclidean":  # exact, unlike the scores, so large offsets do not cancel
+                distances.append((batch - weights[bmu]).norm(dim=1))
+            else:
+                distances.append(self._score_distances(batch, score[:, None])[:, 0])
+        bmu = torch.cat(bmus)
+        distance = torch.cat(distances) if return_distance else None
+        has_bmu = self._has_bmu(data)
+        if has_bmu is not None:
+            bmu[~has_bmu] = -1
+            if distance is not None:
+                distance[~has_bmu] = torch.nan
+        return bmu, distance
+
+    def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
+        """Fits the map, starting from the initialisation given by init.
 
         Args:
             X: Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like or torch tensor.
@@ -182,77 +312,114 @@ class SOM:
             sums, counts = torch.zeros_like(weights), weights.new_zeros(n_nodes)
             for batch in data.split(self._batch_size):
                 bmus = self._scores(batch, weights).argmin(1)
-                if self.metric == "cosine":  # zero-norm samples have no BMU and do not contribute
-                    keep = batch.norm(dim=1) > 0
+                keep = self._has_bmu(batch)  # samples without a BMU do not contribute
+                if keep is not None:
                     batch, bmus = batch[keep], bmus[keep]
                 sums.index_add_(0, bmus, batch)
                 counts += torch.bincount(bmus, minlength=n_nodes)
             h = torch.exp(-self._grid_sq_dist / (2 * sigma**2))
             numerator, denominator = h @ sums, h @ counts
             weights = torch.where(denominator[:, None] > 0, numerator / denominator[:, None], weights)
-        self._weights = weights
-        self.weights_ = weights.cpu().numpy()
-        self.n_features_in_ = data.shape[1]
-        self.labels_ = self._bmus(data, weights).cpu().numpy()
+        self._set_weights(weights)
+        self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
         return self
 
-    def predict(self, X) -> np.ndarray:
-        """Returns the BMU index (int64) per sample; -1 for zero-norm samples under the cosine metric."""
-        self._check_fitted()
-        return self._bmus(self._check_X(X), self._weights).cpu().numpy()
+    @overload
+    def predict(self, X: ArrayLike | torch.Tensor, return_distance: Literal[False] = False) -> np.ndarray: ...
 
-    def fit_predict(self, X, y=None) -> np.ndarray:
+    @overload
+    def predict(self, X: ArrayLike | torch.Tensor, return_distance: Literal[True]) -> tuple[np.ndarray, np.ndarray]: ...
+
+    @overload
+    def predict(
+        self, X: ArrayLike | torch.Tensor, return_distance: bool
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]: ...
+
+    def predict(
+        self, X: ArrayLike | torch.Tensor, return_distance: bool = False
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+        """Returns the BMU index (int64) per sample; -1 for samples without a BMU (see metric).
+
+        Args:
+            X: Samples, shape (n_samples, n_features) or (..., n_features).
+            return_distance: Whether to also return each sample's distance (float32) to its BMU in the metric, NaN
+                for samples without a BMU. It comes from the same pass as the BMU search, and its mean over the
+                samples with a BMU is quantization_error(X).
+
+        Returns:
+            The BMU indices, or the tuple (BMU indices, distances) if return_distance.
+        """
+        self._check_fitted()
+        bmus, distances = self._bmus(self._check_X(X), self._weights, return_distance)
+        return (bmus.cpu().numpy(), distances.cpu().numpy()) if return_distance else bmus.cpu().numpy()
+
+    def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
         """Fits the map and returns labels_."""
         return self.fit(X).labels_
 
     def _distances(self, batch: torch.Tensor) -> torch.Tensor:
         if self.metric == "euclidean":  # exact, unlike the BMU search, so large offsets do not cancel
             return torch.cdist(batch, self._weights, compute_mode="donot_use_mm_for_euclid_dist")
-        cos = -self._scores(batch, self._weights) / batch.norm(dim=1, keepdim=True)
-        return torch.where(torch.isfinite(cos), (1 - cos).clamp(0, 2), 1.0)
+        distances = self._score_distances(batch, self._scores(batch, self._weights))
+        has_bmu = self._has_bmu(batch)
+        if has_bmu is not None:
+            distances[~has_bmu] = 1
+        return distances
 
-    def transform(self, X) -> np.ndarray:
+    def transform(self, X: ArrayLike | torch.Tensor) -> np.ndarray:
         """Returns the distance of every sample to every node, shape (n_samples, n_nodes).
 
-        Euclidean or cosine distances (1 - cosine similarity) depending on the metric. The output is a dense
-        n_samples x n_nodes float32 array; for large inputs call it on slices or use predict.
+        Distances in the metric; 1 for samples without a BMU. The output is a dense n_samples x n_nodes float32
+        array; for large inputs call it on slices or use predict.
         """
         self._check_fitted()
         data = self._check_X(X)
         return torch.cat([self._distances(batch) for batch in data.split(self._batch_size)]).cpu().numpy()
 
-    def fit_transform(self, X, y=None) -> np.ndarray:
+    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
         """Fits the map and returns transform(X)."""
         return self.fit(X).transform(X)
 
-    def _top2(self, X) -> tuple[torch.Tensor, torch.Tensor]:
-        """Distance to the BMU and indices of the two best nodes, for every sample that has a BMU."""
+    def quantization_error(self, X: ArrayLike | torch.Tensor) -> float:
+        """Mean distance (in the metric) between each sample with a BMU and its BMU."""
+        self._check_fitted()
+        bmus, distances = self._bmus(self._check_X(X), self._weights)
+        return float(distances[bmus >= 0].cpu().double().mean())  # on the CPU because MPS has no float64
+
+    def topographic_error(self, X: ArrayLike | torch.Tensor) -> float:
+        """Fraction of samples whose first and second BMU are not adjacent on the grid (8-neighbourhood)."""
         self._check_fitted()
         data = self._check_X(X)
-        if self.metric == "cosine":
-            data = data[data.norm(dim=1) > 0]
-        dists, nodes = [], []
-        for batch in data.split(self._batch_size):
-            best = self._scores(batch, self._weights).topk(min(2, len(self._weights)), dim=1, largest=False)
-            if self.metric == "euclidean":
-                dists.append((batch - self._weights[best.indices[:, 0]]).norm(dim=1))
-            else:
-                dists.append((1 + best.values[:, 0] / batch.norm(dim=1)).clamp(0, 2))
-            nodes.append(best.indices)
-        return torch.cat(dists), torch.cat(nodes)
-
-    def quantization_error(self, X) -> float:
-        """Mean distance (in the chosen metric) between each sample and its BMU."""
-        dist, _ = self._top2(X)
-        return float(dist.cpu().double().mean())  # on the CPU because MPS has no float64
-
-    def topographic_error(self, X) -> float:
-        """Fraction of samples whose first and second BMU are not adjacent on the grid (8-neighbourhood)."""
-        _, nodes = self._top2(X)
-        if nodes.shape[1] < 2:
+        if len(self._weights) < 2:
             return 0.0
+        has_bmu = self._has_bmu(data)
+        if has_bmu is not None:
+            data = data[has_bmu]
+        nodes = torch.cat(
+            [
+                self._scores(batch, self._weights).topk(2, dim=1, largest=False).indices
+                for batch in data.split(self._batch_size)
+            ]
+        )
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
         return float((offset > 1).cpu().double().mean())
+
+    def distance_map(self) -> np.ndarray:
+        """Returns the U-matrix, shape (n_rows, n_cols).
+
+        Each node's summed euclidean distance to its (up to 8) neighbours on the grid, normalised to a maximum of 1
+        (all zeros if all neighbouring nodes coincide), as MiniSom's ``distance_map(scaling="sum")``.
+        """
+        self._check_fitted()
+        grid = self._weights.reshape(self.n_rows, self.n_cols, -1)
+        padded = torch.nn.functional.pad(grid, (0, 0, 1, 1, 1, 1), value=torch.nan)  # NaN neighbours beyond the edge
+        total = sum(
+            (grid - padded[row : row + self.n_rows, col : col + self.n_cols]).norm(dim=-1).nan_to_num()
+            for row in range(3)
+            for col in range(3)
+        )
+        total = total / total.max() if total.max() > 0 else total
+        return total.cpu().numpy()
 
 
 BatchSOM = SOM
