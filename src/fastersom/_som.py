@@ -238,7 +238,8 @@ class SOM:
         if self.metric == "manhattan":
             return torch.cdist(batch, weights, p=1)
         weights = self._centre(weights)
-        return -(self._centre(batch) @ (weights / weights.norm(dim=1, keepdim=True).clamp_min(1e-12)).T)
+        # negate the small weight matrix, not the batch x nodes scores
+        return self._centre(batch) @ (weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12)).T
 
     def _score_distances(self, batch: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
         """Distances from the scores of any number of nodes per sample, for every metric but euclidean."""
