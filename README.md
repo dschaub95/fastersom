@@ -45,7 +45,9 @@ Options:
   `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small
   `sigma_initial`, e.g. the previous map's `sigma_final`.
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce spatiomic.
-- `batch_size` bounds memory (about `batch_size x n_nodes` floats) without changing the algorithm.
+- `batch_size` bounds memory (about `batch_size x n_nodes` floats) without changing the algorithm. On CUDA and MPS
+  it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5
+  on MPS) of the free GPU memory, so it rarely needs tuning.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.

@@ -2,10 +2,11 @@
 
 ## Unreleased
 
+- On CUDA and MPS (torch >= 2.5), `batch_size` defaults to 2^28 / n_nodes (where speed levels off), reduced to fit
+  `memory_fraction` (new, default 0.9 on CUDA and 0.5 on MPS) of the free GPU memory, instead of 65536: small maps are
+  faster, large maps need less memory, and a nearly full GPU no longer fails with an out-of-memory error.
 - The NaN/inf check of `X` no longer allocates about 1.7x the size of `X` on the device.
-
 - `fit` holds one nodes x nodes neighbourhood matrix at a time instead of up to four.
-
 - `transform` fills its result on the CPU batch by batch instead of holding it twice on the device.
 
 ## 0.2.1 (2026-10-22)
