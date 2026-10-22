@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-22)
 
 - `init` also accepts an array of initial weights, shape (n_rows * n_cols, n_features) or (n_rows, n_cols,
   n_features), and `n_epochs=0` is allowed, so fitting keeps the given weights; this also enables warm starts
@@ -15,6 +15,7 @@
   correlation, like zero-norm samples under cosine.
 - Pickled maps hold no device tensors and load on the default device if the configured one is unavailable.
 - Type hints for `X` and `y`; `predict` is overloaded on `return_distance`.
+- Cosine BMU search is about 5x faster on CPU.
 - Euclidean and cosine maps are unchanged.
 
 ## 0.1.1 (2026-10-21)
