@@ -2,9 +2,9 @@
 
 A small, fast batch self-organising map (SOM) in PyTorch: a reimplementation of Kohonen's batch map with a
 rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhood width. Its defaults reproduce the
-maps of [spatiomic](https://github.com/complextissue/spatiomic)'s `so.dimension.som`. Data stays on the device (CUDA,
-MPS or CPU) and the per-epoch update uses per-node sums, so an epoch costs one BMU search plus a (nodes x nodes) matrix
-product.
+batch-trained maps of [XPySom](https://github.com/Manciukic/xpysom) with a gaussian neighbourhood of initial width
+half the grid. Data stays on the device (CUDA, MPS or CPU) and the per-epoch update uses per-node sums, so an epoch
+costs one BMU search plus a (nodes x nodes) matrix product.
 
 ## Install
 
@@ -44,7 +44,7 @@ Options:
   (`SOM(init=som.weights_).fit(X)`); with `n_epochs=0`, `fit` keeps them unchanged. The sigma schedule restarts at
   `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small
   `sigma_initial`, e.g. the previous map's `sigma_final`.
-- `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce spatiomic.
+- `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce XPySom's.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats) without changing the algorithm. On CUDA and MPS
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5
   on MPS) of the free GPU memory, so it rarely needs tuning.
@@ -54,23 +54,28 @@ so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for
 
 ## Benchmark
 
-480,000 x 34 pixels (the spatiomic tutorial's subsample), 30 x 30 nodes, 10 epochs, fit time (mean of seeds 0-2) and
-peak GPU memory including the data and the allocator cache, each configuration in its own process
-([`benchmarks/memory.py`](benchmarks/memory.py)):
+480,000 x 34 pixels of multiplexed imaging data, 30 x 30 nodes, 10 epochs, fit time (mean of seeds 0-2) and peak GPU
+memory including the data and the allocator cache, each configuration in its own process
+([`benchmarks/memory.py`](benchmarks/memory.py)). XPySom uses its batch training with neighbourhood width 15 decaying
+to 0 and learning rate 0.2 decaying to 0.003; torchsom gets the same neighbourhood schedule.
 
-| implementation    | hardware     | batch size         | fit time | peak GPU memory | quantization error |
-| ----------------- | ------------ | ------------------ | -------- | --------------- | ------------------ |
-| fastersom         | NVIDIA A100  | default (298,261)  | 0.12 s   | 1150 MiB        | 0.168              |
-| fastersom         | NVIDIA A100  | 32,768             | 0.12 s   | 204 MiB         | 0.168              |
-| fastersom         | NVIDIA A100  | 8,096              | 0.20 s   | 118 MiB         | 0.168              |
-| spatiomic (CuPy)  | NVIDIA A100  | default (8,096)    | 0.46 s   | 340 MiB         | 0.169              |
-| spatiomic (CuPy)  | NVIDIA A100  | 65,536             | 0.41 s   | 2250 MiB        | 0.169              |
-| spatiomic (NumPy) | 256-core CPU | default            | 40 s     | -               | 0.169              |
+| implementation                                       | hardware     | batch size        | fit time | peak GPU memory | quantization error |
+| ---------------------------------------------------- | ------------ | ----------------- | -------- | --------------- | ------------------ |
+| fastersom                                            | NVIDIA A100  | default (298,261) | 0.12 s   | 1150 MiB        | 0.168              |
+| fastersom                                            | NVIDIA A100  | 32,768            | 0.12 s   | 204 MiB         | 0.168              |
+| fastersom                                            | NVIDIA A100  | 8,096             | 0.20 s   | 118 MiB         | 0.168              |
+| [XPySom](https://github.com/Manciukic/xpysom) (CuPy) | NVIDIA A100  | 8,096             | 0.46 s   | 313 MiB         | 0.169              |
+| XPySom (CuPy)                                        | NVIDIA A100  | 65,536            | 0.41 s   | 2088 MiB        | 0.169              |
+| [torchsom](https://github.com/michelin/TorchSOM)     | NVIDIA A100  | 1,024             | 21.7 s   | 44 MiB          | 0.175              |
+| fastersom                                            | 256-core CPU | default (8,192)   | 1.8 s    | -               | 0.169              |
+| XPySom (NumPy)                                       | 256-core CPU | 8,096             | 40.6 s   | -               | 0.168              |
 
-With less memory than spatiomic's default (204 vs 340 MiB), fastersom fits about 4x faster; at the same batch size it
-needs about a third of the memory and is about 2x faster. Beyond about 32,768 samples per batch neither library gets
-much faster, so on this small dataset fastersom's default batch size uses more memory for no gain; it only takes what
-is free and shrinks on a fuller GPU. The CPU row was measured separately.
+With less GPU memory than XPySom at 8,096 samples per batch (204 vs 313 MiB), fastersom fits about 4x faster; at the
+same batch size it needs about 40% of the memory and is about 2.4x faster. Beyond about 32,768 samples per batch neither
+gets much faster, so on this small dataset fastersom's default batch size uses more memory for no gain; it only takes
+what is free and shrinks on a fuller GPU. torchsom updates the map after every mini-batch with a learning rate, so its
+batch size changes the map and it needs small batches: at 1,024, its fastest, it takes about 180x as long, though with
+the data kept in host memory. On the CPU, fastersom is about 23x faster than XPySom.
 
 ## Algorithm
 
