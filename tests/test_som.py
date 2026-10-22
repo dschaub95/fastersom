@@ -1,4 +1,5 @@
 import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -70,7 +71,7 @@ def test_attributes_and_shapes(data):
     assert dist.dtype == np.float32
 
 
-def test_torch_input_and_flattening(data):
+def test_input_types_and_flattening(data):
     weights = SOM(5, 4, n_epochs=2, random_state=0, device=CPU).fit(data).weights_
     som = SOM(5, 4, n_epochs=2, random_state=0, device=CPU).fit(torch.from_numpy(data).reshape(50, 100, 6))
     np.testing.assert_allclose(som.weights_, weights, atol=1e-6)
@@ -82,6 +83,9 @@ def test_torch_input_and_flattening(data):
     np.testing.assert_allclose(som.weights_, weights, atol=1e-6)
     som.fit(np.ascontiguousarray(data[::-1])[::-1])  # negative strides
     np.testing.assert_allclose(som.weights_, weights, atol=1e-6)
+    for x in (data, data[::-1].copy()[::-1]):  # only through DLPack, like CuPy; negative strides
+        som.fit(SimpleNamespace(__dlpack__=x.__dlpack__, __dlpack_device__=x.__dlpack_device__, copy=x.copy))
+        np.testing.assert_allclose(som.weights_, weights, atol=1e-6)
 
 
 def test_float64_default_dtype(data):
@@ -95,10 +99,11 @@ def test_float64_default_dtype(data):
     np.testing.assert_allclose(som.weights_, weights, atol=1e-6)
 
 
-def test_exact_distances_with_large_offset():
-    # the dot-product shortcut used for BMU search cancels catastrophically here; transform must not
-    X = np.array([[1e5, 1e5], [1e5 + 1, 1e5]], np.float32)
-    som = SOM(1, 2, n_epochs=1, init="sample", sigma_initial=0.01, random_state=0, device=CPU).fit(X)
+def test_euclidean_with_large_offset():
+    # ||w||^2 - 2 x.w rounds nearby nodes to the same score in float32 unless samples and nodes are centred first
+    X = np.array([[1e4], [1e4 + 0.01], [1e4 + 1]], np.float32)
+    som = SOM.from_weights(X, 1, 3, device=CPU)
+    np.testing.assert_array_equal(som.predict(X), [0, 1, 2])
     np.testing.assert_allclose(som.transform(X), brute_force_distances(X, som.weights_, "euclidean"), atol=1e-6)
 
 

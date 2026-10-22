@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-10-22)
+
+- Euclidean BMU search centres samples and nodes on the mean node, so data with a large offset relative to the node
+  spacing (e.g. raw 16-bit intensities) no longer gets BMUs that are not the nearest node; this affects `fit`,
+  `predict`, `quantization_error` and `topographic_error`. Small maps on the CPU are up to about a third slower; large
+  maps and GPUs are unaffected.
+- `X` and `init` also accept DLPack arrays such as CuPy, converted without leaving the GPU.
+
 ## 0.2.0 (2026-10-22)
 
 - `init` also accepts an array of initial weights, shape (n_rows * n_cols, n_features) or (n_rows, n_cols,
