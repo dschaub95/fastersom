@@ -361,7 +361,10 @@ class SOM:
         """
         self._check_fitted()
         data = self._check_X(X)
-        return torch.cat([self._distances(batch) for batch in data.split(self._batch_size)]).cpu().numpy()
+        distances = torch.empty(len(data), len(self._weights))  # on the CPU, as it can exceed device memory
+        for batch, rows in zip(data.split(self._batch_size), distances.split(self._batch_size), strict=True):
+            rows.copy_(self._distances(batch))
+        return distances.numpy()
 
     def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
         """Fits the map and returns transform(X)."""

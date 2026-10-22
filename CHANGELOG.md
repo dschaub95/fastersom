@@ -6,6 +6,8 @@
 
 - `fit` holds one nodes x nodes neighbourhood matrix at a time instead of up to four.
 
+- `transform` fills its result on the CPU batch by batch instead of holding it twice on the device.
+
 ## 0.2.1 (2026-10-22)
 
 - Euclidean BMU search centres samples and nodes on the mean node, so data with a large offset relative to the node
