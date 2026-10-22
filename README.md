@@ -24,19 +24,29 @@ som.fit(X)
 som.weights_  # (900, d) node weights, node = row * n_cols + col
 som.labels_  # BMU index per training sample
 labels = som.predict(X)  # BMU index per sample
+labels, dist = som.predict(X, return_distance=True)  # and the distance to it, in the same pass
 dist = som.transform(X)  # (n, 900) distance to every node
+umatrix = som.distance_map()  # (30, 30) summed distance to the grid neighbours, max 1
 print(som.quantization_error(X), som.topographic_error(X))
+
+som = SOM.from_weights(som.weights_, n_rows=30, n_cols=30)  # fitted map from saved weights, no data needed
 ```
 
 Options:
 
-- `metric="cosine"` finds BMUs by cosine similarity. Zero-norm samples have no BMU, get label -1 and are left out of
-  the update and the error measures.
-- `init="sample"` initialises the nodes from random samples instead of seeded random unit vectors.
+- `metric` sets the distance used for BMUs, distances and error measures: `"euclidean"` (default), `"manhattan"`
+  (L1), `"cosine"` (1 - cosine similarity) or `"correlation"` (1 - Pearson correlation). Nodes are always updated to
+  the neighbourhood-weighted mean of the raw samples (not the median under manhattan, nor centred samples under
+  correlation). Zero-norm samples under cosine and constant samples under correlation have no BMU: they get label -1
+  and distance NaN in `predict`, distance 1 in `transform`, and are left out of the update and the error measures.
+- `init="sample"` initialises the nodes from random samples instead of seeded random unit vectors. An array of shape
+  `(n_rows * n_cols, d)` or `(n_rows, n_cols, d)` gives the initial weights instead, e.g. to continue training
+  (`SOM(init=som.weights_).fit(X)`); with `n_epochs=0`, `fit` keeps them unchanged.
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce spatiomic.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats) without changing the algorithm.
 
-`BatchSOM` is an alias for `SOM`.
+Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
+so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.
 
 ## Benchmark
 

@@ -1,10 +1,14 @@
+import pickle
+
 import numpy as np
 import pytest
 import torch
+from scipy.spatial.distance import cdist
 
 from fastersom import SOM
 
 CPU = "cpu"
+METRICS = ["euclidean", "manhattan", "cosine", "correlation"]
 
 
 @pytest.fixture(scope="module")
@@ -17,18 +21,18 @@ def data():
 
 
 def brute_force_distances(X, weights, metric):
-    X, weights = X.astype(np.float64), weights.astype(np.float64)
-    if metric == "euclidean":
-        return np.linalg.norm(X[:, None] - weights[None], axis=-1)
-    cos = X @ weights.T / np.linalg.norm(X, axis=1, keepdims=True) / np.linalg.norm(weights, axis=1)
-    return 1 - cos
+    return cdist(X.astype(np.float64), weights.astype(np.float64), "cityblock" if metric == "manhattan" else metric)
 
 
-def reference_som(X, n_rows, n_cols, sigma_initial, sigma_final, epochs, metric="euclidean", seed=0):
-    """Kohonen's batch map written out per sample in float64, from fastersom's seeded random initialisation."""
-    rng = np.random.RandomState(seed)
-    weights = rng.rand(n_rows, n_cols, X.shape[1]) * 2 - 1
-    weights = (weights / np.linalg.norm(weights, axis=-1, keepdims=True)).reshape(n_rows * n_cols, -1)
+def random_init(n_rows, n_cols, n_features, seed=0):
+    """fastersom's seeded init="random" weights, in float64."""
+    weights = np.random.RandomState(seed).rand(n_rows, n_cols, n_features) * 2 - 1
+    return (weights / np.linalg.norm(weights, axis=-1, keepdims=True)).reshape(n_rows * n_cols, -1)
+
+
+def reference_som(X, n_rows, n_cols, sigma_initial, sigma_final, epochs, metric="euclidean", seed=0, weights=None):
+    """Kohonen's batch map written out per sample in float64, from the given or fastersom's seeded random weights."""
+    weights = random_init(n_rows, n_cols, X.shape[1], seed) if weights is None else weights.astype(np.float64)
     coords = np.array([(r, c) for r in range(n_rows) for c in range(n_cols)])
     grid_sq_dist = ((coords[:, None] - coords[None]) ** 2).sum(-1)
     X = X.astype(np.float64)
@@ -119,7 +123,7 @@ def test_input_validation(data):
 
 def test_invalid_parameters(data):
     for kwargs, match in [
-        (dict(metric="manhattan"), "metric"),
+        (dict(metric="chebyshev"), "metric"),
         (dict(init="pca"), "init"),
         (dict(sigma_initial=0), "sigma"),
         (dict(sigma_final=-1), "sigma"),
@@ -141,17 +145,22 @@ def test_determinism(data):
     assert not np.array_equal(a, c)
 
 
-@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+@pytest.mark.parametrize("metric", METRICS)
 def test_matches_brute_force(data, metric):
     som = SOM(6, 6, n_epochs=3, init="sample", metric=metric, random_state=0, device=CPU).fit(data)
     dist = brute_force_distances(data, som.weights_, metric)
     # float32 vs float64 may flip near-ties; require agreement on all but a handful and equal distances
-    assert (som.predict(data) == dist.argmin(1)).mean() > 0.999
-    np.testing.assert_allclose(som.transform(data), dist, atol=1e-4)
+    labels, distances = som.predict(data, return_distance=True)
+    assert (labels == dist.argmin(1)).mean() > 0.999
+    np.testing.assert_allclose(dist[np.arange(len(data)), labels], dist.min(1), atol=1e-4)
+    np.testing.assert_allclose(distances, dist.min(1), rtol=1e-5, atol=1e-5)
+    np.testing.assert_array_equal(labels, som.predict(data))
+    np.testing.assert_allclose(som.transform(data), dist, rtol=1e-5, atol=1e-4)
     assert som.quantization_error(data) == pytest.approx(dist.min(1).mean(), abs=1e-5)
+    assert som.quantization_error(data) == pytest.approx(distances.astype(np.float64).mean(), rel=1e-12)
 
 
-@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+@pytest.mark.parametrize("metric", METRICS)
 def test_matches_reference(data, metric):
     som_kwargs = dict(sigma_initial=1.25, sigma_final=0.125, metric=metric, random_state=0, device=CPU)
 
@@ -170,21 +179,22 @@ def test_matches_reference(data, metric):
         assert som.topographic_error(data) == pytest.approx(reference_topographic_error(data, ref, 10), abs=1e-2)
 
 
-@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+@pytest.mark.parametrize("metric", METRICS)
 def test_negative_inputs(data, metric):
     negative = data - data.max() - 1  # every feature strictly negative
     assert (negative < 0).all()
     som = SOM(6, 6, n_epochs=3, metric=metric, random_state=0, device=CPU).fit(negative)
     assert np.isfinite(som.weights_).all()
-    if metric == "euclidean":  # weights are convex combinations of the samples
+    if metric in ("euclidean", "manhattan"):  # weights are convex combinations of the samples
         assert (som.weights_ < 0).all()
     dist = brute_force_distances(negative, som.weights_, metric)
     assert (som.labels_ == dist.argmin(1)).mean() > 0.999
     assert som.quantization_error(negative) == pytest.approx(dist.min(1).mean(), abs=1e-4)
     # default sigmas: sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2 and sigma_final = 0.1 * sigma_initial
-    ref = reference_som(negative, 6, 6, 1.5, 0.15, 3, metric)
-    ref_dist = brute_force_distances(negative, ref, metric)
-    assert som.quantization_error(negative) == pytest.approx(ref_dist.min(1).mean(), rel=1e-3)
+    if metric != "manhattan":  # under L1 all samples share one BMU in epoch 1, so all nodes and BMUs then tie
+        ref = reference_som(negative, 6, 6, 1.5, 0.15, 3, metric)
+        ref_dist = brute_force_distances(negative, ref, metric)
+        assert som.quantization_error(negative) == pytest.approx(ref_dist.min(1).mean(), rel=1e-3)
     som = SOM(6, 6, n_epochs=1, metric=metric, random_state=0, device=CPU).fit(negative)
     np.testing.assert_allclose(som.weights_, reference_som(negative, 6, 6, 1.5, 0.15, 1, metric), atol=1e-4)
 
@@ -199,30 +209,38 @@ def test_cosine_scale_invariance(data):
     assert (dist <= 2).all()
 
 
-def test_cosine_zero_rows(data):
-    with_zeros = data.copy()
-    with_zeros[::10] = 0
-    nonzero = data[np.arange(len(data)) % 10 != 0]
-    som = SOM(6, 6, n_epochs=3, metric="cosine", random_state=0, device=CPU).fit(with_zeros)
-    ref = SOM(6, 6, n_epochs=3, metric="cosine", random_state=0, device=CPU).fit(nonzero)
-    # zero rows have no BMU, are left out of the update and the error measures
+@pytest.mark.parametrize(("metric", "constant"), [("cosine", 0.0), ("correlation", 0.0), ("correlation", 2.7)])
+def test_rows_without_bmu(data, metric, constant):
+    # zero rows under cosine and constant (zero-variance) rows under correlation have no BMU
+    invalid = data.copy()
+    invalid[::10] = constant
+    valid = data[np.arange(len(data)) % 10 != 0]
+    som = SOM(6, 6, n_epochs=3, metric=metric, random_state=0, device=CPU).fit(invalid)
+    ref = SOM(6, 6, n_epochs=3, metric=metric, random_state=0, device=CPU).fit(valid)
+    # they are left out of the update and the error measures
     np.testing.assert_allclose(som.weights_, ref.weights_, atol=1e-6)
     assert (som.labels_[::10] == -1).all()
-    assert (som.predict(with_zeros)[::10] == -1).all()
+    labels, distances = som.predict(invalid, return_distance=True)
+    assert (labels[::10] == -1).all()
+    assert np.isnan(distances[::10]).all()
     np.testing.assert_array_equal(np.delete(som.labels_, slice(None, None, 10)), ref.labels_)
-    np.testing.assert_array_equal(som.transform(with_zeros)[::10], 1)
-    assert som.quantization_error(with_zeros) == pytest.approx(ref.quantization_error(nonzero), rel=1e-6)
-    assert som.topographic_error(with_zeros) == pytest.approx(ref.topographic_error(nonzero), rel=1e-6)
+    np.testing.assert_allclose(
+        np.delete(distances, slice(None, None, 10)), ref.predict(valid, return_distance=True)[1], atol=1e-6
+    )
+    np.testing.assert_array_equal(som.transform(invalid)[::10], 1)
+    assert som.quantization_error(invalid) == pytest.approx(ref.quantization_error(valid), rel=1e-6)
+    assert som.topographic_error(invalid) == pytest.approx(ref.topographic_error(valid), rel=1e-6)
 
-    # init="sample" never picks a zero row and needs at least one non-zero row
-    som = SOM(6, 6, init="sample", metric="cosine", random_state=0, device=CPU)
+    # init="sample" never picks such a row and needs at least one other row
+    som = SOM(6, 6, init="sample", metric=metric, random_state=0, device=CPU)
     som._setup()
-    assert (som._init_weights(torch.from_numpy(with_zeros)).norm(dim=1) > 0).all()
-    with pytest.raises(ValueError, match="non-zero"):
-        SOM(6, 6, init="sample", metric="cosine", device=CPU).fit(np.zeros((10, 6)))
+    weights = som._init_weights(torch.from_numpy(invalid))
+    assert (som._has_bmu(weights)).all()
+    with pytest.raises(ValueError, match="with a BMU"):
+        SOM(6, 6, init="sample", metric=metric, device=CPU).fit(np.full((10, 6), constant))
 
 
-@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+@pytest.mark.parametrize("metric", METRICS)
 def test_batch_size_does_not_change_results(data, metric):
     kwargs = dict(n_rows=6, n_cols=6, metric=metric, random_state=0, device=CPU)
     full = SOM(n_epochs=1, **kwargs).fit(data)
@@ -232,6 +250,9 @@ def test_batch_size_does_not_change_results(data, metric):
         np.testing.assert_allclose(som.weights_, full.weights_, atol=1e-5)
         np.testing.assert_array_equal(som.labels_, full.labels_)
         np.testing.assert_allclose(som.transform(data), full.transform(data), atol=1e-5)
+        np.testing.assert_allclose(
+            som.predict(data, return_distance=True)[1], full.predict(data, return_distance=True)[1], atol=1e-5
+        )
         assert som.quantization_error(data) == pytest.approx(full.quantization_error(data), rel=1e-5)
         assert som.topographic_error(data) == pytest.approx(full.topographic_error(data), abs=1e-3)
         # over several epochs rounding differences can flip near-tied BMUs, so only require the same map quality
@@ -245,10 +266,94 @@ def test_single_node(data):
     np.testing.assert_allclose(som.weights_[0], data.mean(0), atol=1e-5)
     assert (som.labels_ == 0).all()
     assert som.topographic_error(data) == 0.0
+    np.testing.assert_array_equal(som.distance_map(), [[0]])
+
+
+@pytest.mark.parametrize("shape", ["flat", "grid"])
+def test_init_weights(data, shape):
+    weights = random_init(5, 4, 6)
+    init = weights if shape == "flat" else weights.reshape(5, 4, 6)
+    # the seeded random initialisation passed as an array gives the very same map
+    som = SOM(5, 4, n_epochs=3, init=init, device=CPU).fit(data)
+    ref = SOM(5, 4, n_epochs=3, random_state=0, device=CPU).fit(data)
+    np.testing.assert_array_equal(som.weights_, ref.weights_)
+    np.testing.assert_array_equal(som.labels_, ref.labels_)
+
+    # n_epochs=0 keeps the given weights exactly, as a copy
+    init = ref.weights_.copy() if shape == "flat" else ref.weights_.reshape(5, 4, 6).copy()
+    som = SOM(5, 4, n_epochs=0, init=init, device=CPU).fit(data)
+    init[:] = 0
+    np.testing.assert_array_equal(som.weights_, ref.weights_)
+    np.testing.assert_array_equal(som.labels_, ref.labels_)
+    np.testing.assert_array_equal(som.transform(data), ref.transform(data))
+
+    # from_weights builds the same fitted map without data; labels_ needs training samples
+    som = SOM.from_weights(torch.from_numpy(ref.weights_), 5, 4, device=CPU)
+    np.testing.assert_array_equal(som.weights_, ref.weights_)
+    np.testing.assert_array_equal(som.predict(data), ref.labels_)
+    assert som.quantization_error(data) == ref.quantization_error(data)
+    assert not hasattr(som, "labels_")
+    np.testing.assert_array_equal(som.fit(data).labels_, ref.labels_)
+
+
+@pytest.mark.parametrize("metric", METRICS)
+def test_warm_start(data, metric):
+    # training from given weights runs the batch map from exactly those weights
+    start = np.random.default_rng(1).normal(size=(6, 6, 6)).astype(np.float32)
+    som = SOM(6, 6, n_epochs=1, init=start, metric=metric, device=CPU).fit(data)
+    ref = reference_som(data, 6, 6, 1.5, 0.15, 1, metric, weights=start.reshape(36, 6))
+    np.testing.assert_allclose(som.weights_, ref, atol=1e-4)
+
+
+def test_invalid_init_weights(data):
+    for init, match in [
+        (np.zeros((19, 6)), "shape"),
+        (np.zeros((4, 5, 6)), "shape"),
+        (np.zeros(20), "shape"),
+        (np.zeros((20, 0)), "shape"),
+        (np.full((20, 6), np.nan), "NaN"),
+        (np.zeros((20, 3)), "features"),
+    ]:
+        with pytest.raises(ValueError, match=match):
+            SOM(5, 4, init=init, device=CPU).fit(data)
+    with pytest.raises(ValueError, match="shape"):
+        SOM.from_weights(np.zeros((19, 6)), 5, 4, device=CPU)
+
+
+def test_distance_map():
+    # summed euclidean distances to the 8-neighbours, worked out by hand, on a 2 x 3 grid
+    weights = np.array([[0, 0], [1, 0], [3, 0], [0, 0], [0, 0], [3, 4]], np.float32)
+    distance_map = SOM.from_weights(weights, 2, 3, device=CPU).distance_map()
+    expected = np.array([[1, 1 + 2 + 1 + 1 + np.sqrt(20), 2 + 3 + 4], [1, 1 + 3 + 5, np.sqrt(20) + 4 + 5]])
+    expected /= expected.max()
+    np.testing.assert_allclose(distance_map, expected, rtol=1e-6)
+    assert SOM.from_weights(np.ones((6, 2)), 2, 3, device=CPU).distance_map().max() == 0
+
+
+@pytest.mark.parametrize("metric", METRICS)
+def test_pickle_round_trip(data, metric, monkeypatch):
+    som = SOM(5, 4, n_epochs=2, metric=metric, random_state=0, device=CPU).fit(data)
+    labels, distances = som.predict(data, return_distance=True)
+    loaded = pickle.loads(pickle.dumps(som))
+    np.testing.assert_array_equal(loaded.weights_, som.weights_)
+    np.testing.assert_array_equal(loaded.labels_, som.labels_)
+    np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[0], labels)
+    np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[1], distances)
+
+    # a map configured for a device the loading machine lacks falls back to the default device
+    som.device = "cuda"
+    payload = pickle.dumps(som)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    loaded = pickle.loads(payload)
+    assert loaded.device == "cuda"
+    np.testing.assert_array_equal(loaded.predict(data), labels)
+    loaded.device = None
+    np.testing.assert_array_equal(loaded.fit(data).weights_, som.weights_)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+@pytest.mark.parametrize("metric", METRICS)
 def test_cuda_matches_cpu(data, metric):
     kwargs = dict(n_rows=6, n_cols=6, metric=metric, random_state=0)
     cpu = SOM(n_epochs=1, device=CPU, **kwargs).fit(data)
@@ -259,3 +364,14 @@ def test_cuda_matches_cpu(data, metric):
     cuda = SOM(n_epochs=3, device="cuda", **kwargs).fit(data)
     assert (cuda.labels_ == cpu.labels_).mean() > 0.95
     assert cuda.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
+    som = SOM(5, 4, n_epochs=2, random_state=0, device="cuda").fit(data)
+    payload = pickle.dumps(som)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    loaded = pickle.loads(payload)
+    np.testing.assert_array_equal(loaded.weights_, som.weights_)
+    assert (loaded.predict(data) == som.labels_).mean() > 0.999
+    np.testing.assert_allclose(loaded.distance_map(), som.distance_map(), rtol=1e-5)
