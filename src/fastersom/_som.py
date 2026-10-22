@@ -155,7 +155,6 @@ class SOM:
             raise ValueError("sigma_initial and sigma_final must be finite and > 0")
         self._coords = torch.cartesian_prod(torch.arange(self.n_rows), torch.arange(self.n_cols))
         self._coords = self._coords.to(self._device, torch.float32)
-        self._grid_sq_dist = torch.cdist(self._coords, self._coords) ** 2
 
     def _as_tensor(self, X: ArrayLike | torch.Tensor) -> torch.Tensor:
         if isinstance(X, torch.Tensor):
@@ -309,7 +308,8 @@ class SOM:
                     batch, bmus = batch[keep], bmus[keep]
                 sums.index_add_(0, bmus, batch)
                 counts += torch.bincount(bmus, minlength=n_nodes)
-            h = torch.exp(-self._grid_sq_dist / (2 * sigma**2))
+            # in place, so large maps hold one nodes x nodes matrix at a time
+            h = torch.cdist(self._coords, self._coords).square_().mul_(-0.5 / sigma**2).exp_()
             numerator, denominator = h @ sums, h @ counts
             weights = torch.where(denominator[:, None] > 0, numerator / denominator[:, None], weights)
         self._set_weights(weights)
