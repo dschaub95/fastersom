@@ -3,7 +3,8 @@
 ## Unreleased
 
 - `init` also accepts an array of initial weights, shape (n_rows * n_cols, n_features) or (n_rows, n_cols,
-  n_features), and `n_epochs=0` is allowed, so fitting keeps the given weights; this also enables warm starts.
+  n_features), and `n_epochs=0` is allowed, so fitting keeps the given weights; this also enables warm starts
+  (the sigma schedule restarts, so pass a small `sigma_initial` to continue training rather than retrain).
 - `SOM.from_weights(weights, n_rows, n_cols, **kwargs)` returns a fitted map without training data (`labels_` is not
   set).
 - `predict(X, return_distance=True)` also returns each sample's distance to its BMU, computed in the same pass; its
