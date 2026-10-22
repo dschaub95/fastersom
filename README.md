@@ -55,7 +55,7 @@ so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for
 ## Benchmark
 
 480,000 x 34 pixels, 30 x 30 nodes, 10 epochs, mean of 3 seeds; peak GPU memory includes the data
-([`benchmarks/memory.py`](benchmarks/memory.py)).
+([`benchmarks/memory.py`](https://github.com/dschaub95/fastersom/blob/main/benchmarks/memory.py)).
 
 | implementation                                       | hardware     | batch size        | fit time | peak GPU memory | quantization error |
 | ---------------------------------------------------- | ------------ | ----------------- | -------- | --------------- | ------------------ |

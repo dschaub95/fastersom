@@ -1,6 +1,6 @@
 [project]
 name = "fastersom"
-version = "0.2.1"
+version = "0.3.0"
 description = "Fast batch self-organising maps (SOM) in PyTorch for GPU and CPU"
 readme = "README.md"
 authors = [{ name = "Darius Schaub", email = "schaub.darius@gmail.com" }]
