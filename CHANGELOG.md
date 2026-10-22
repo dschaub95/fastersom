@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The NaN/inf check of `X` no longer allocates about 1.7x the size of `X` on the device.
+
 ## 0.2.1 (2026-10-22)
 
 - Euclidean BMU search centres samples and nodes on the mean node, so data with a large offset relative to the node

@@ -176,7 +176,7 @@ class SOM:
         data = data.reshape(-1, data.shape[-1])
         if hasattr(self, "n_features_in_") and data.shape[1] != self.n_features_in_:
             raise ValueError(f"X has {data.shape[1]} features, but SOM was fitted with {self.n_features_in_}")
-        if not torch.isfinite(data).all():
+        if not torch.isfinite(torch.stack(torch.aminmax(data))).all():  # unlike isfinite(data), without a copy of X
             raise ValueError("X contains NaN or infinite values")
         return data
 
