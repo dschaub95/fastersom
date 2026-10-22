@@ -225,7 +225,10 @@ class SOM:
 
     def _centre(self, x: torch.Tensor) -> torch.Tensor:
         """Centres the rows over the features under correlation, the cosine metric of centred vectors."""
-        return x - x.mean(1, keepdim=True) if self.metric == "correlation" else x
+        if self.metric != "correlation":
+            return x
+        x = x - x[:, :1]  # exact for nearby values, so a large offset does not spoil the float32 mean
+        return x - x.mean(1, keepdim=True)
 
     def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         """Per-node score to minimise.

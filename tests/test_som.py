@@ -179,6 +179,16 @@ def test_matches_reference(data, metric):
     )
 
 
+def test_correlation_with_large_offset():
+    # node 0 is a perfect match shifted by 1e7, where a float32 row mean rounds by up to 1
+    som = SOM.from_weights(
+        np.array([[1e7, 1e7, 1e7 + 1], [0.1, 0, 1]], np.float32), 1, 2, metric="correlation", device=CPU
+    )
+    labels, distances = som.predict(np.array([[0, 0, 1]], np.float32), return_distance=True)
+    assert labels[0] == 0
+    assert distances[0] == pytest.approx(0, abs=1e-6)
+
+
 @pytest.mark.parametrize(("metric", "constant"), [("cosine", 0.0), ("correlation", 2.7)])
 def test_rows_without_bmu(data, metric, constant):
     # zero rows under cosine and constant (zero-variance) rows under correlation have no BMU
