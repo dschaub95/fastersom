@@ -31,6 +31,7 @@ CONFIGS = [
     ("torchsom", "cuda", 1024),  # its fastest; mini-batch updates, so the batch size also changes the map
     ("fastersom", "cpu", None),
     ("xpysom", "cpu", 8096),
+    ("torchsom", "cpu", 1024),
 ]
 
 

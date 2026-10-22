@@ -54,10 +54,8 @@ so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for
 
 ## Benchmark
 
-480,000 x 34 pixels of multiplexed imaging data, 30 x 30 nodes, 10 epochs, fit time (mean of seeds 0-2) and peak GPU
-memory including the data and the allocator cache, each configuration in its own process
-([`benchmarks/memory.py`](benchmarks/memory.py)). XPySom uses its batch training with neighbourhood width 15 decaying
-to 0 and learning rate 0.2 decaying to 0.003; torchsom gets the same neighbourhood schedule.
+480,000 x 34 pixels, 30 x 30 nodes, 10 epochs, mean of 3 seeds; peak GPU memory includes the data
+([`benchmarks/memory.py`](benchmarks/memory.py)).
 
 | implementation                                       | hardware     | batch size        | fit time | peak GPU memory | quantization error |
 | ---------------------------------------------------- | ------------ | ----------------- | -------- | --------------- | ------------------ |
@@ -69,13 +67,10 @@ to 0 and learning rate 0.2 decaying to 0.003; torchsom gets the same neighbourho
 | [torchsom](https://github.com/michelin/TorchSOM)     | NVIDIA A100  | 1,024             | 21.7 s   | 44 MiB          | 0.175              |
 | fastersom                                            | 256-core CPU | default (8,192)   | 1.8 s    | -               | 0.169              |
 | XPySom (NumPy)                                       | 256-core CPU | 8,096             | 40.6 s   | -               | 0.168              |
+| torchsom                                             | 256-core CPU | 1,024             | 39.2 s   | -               | 0.176              |
 
-With less GPU memory than XPySom at 8,096 samples per batch (204 vs 313 MiB), fastersom fits about 4x faster; at the
-same batch size it needs about 40% of the memory and is about 2.4x faster. Beyond about 32,768 samples per batch neither
-gets much faster, so on this small dataset fastersom's default batch size uses more memory for no gain; it only takes
-what is free and shrinks on a fuller GPU. torchsom updates the map after every mini-batch with a learning rate, so its
-batch size changes the map and it needs small batches: at 1,024, its fastest, it takes about 180x as long, though with
-the data kept in host memory. On the CPU, fastersom is about 23x faster than XPySom.
+At equal GPU memory fastersom is about 4x faster than XPySom, and about 20x faster on the CPU. torchsom updates the map
+per mini-batch, so it needs small batches and is far slower.
 
 ## Algorithm
 
