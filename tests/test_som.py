@@ -94,6 +94,7 @@ def test_float64_default_dtype(data):
     torch.set_default_dtype(torch.float64)
     try:
         som = SOM(5, 4, n_epochs=2, random_state=0, device=CPU).fit(data)
+        assert som.transform(data[:10]).dtype == np.float32
     finally:
         torch.set_default_dtype(default)
     np.testing.assert_allclose(som.weights_, weights, atol=1e-6)
@@ -310,6 +311,11 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.labels_, som.labels_)
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[0], labels)
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[1], distances)
+    state = som.__getstate__()
+    del state["memory_fraction"]  # as pickled by 0.2
+    loaded = SOM.__new__(SOM)
+    loaded.__setstate__(state)
+    np.testing.assert_array_equal(loaded.predict(data), labels)
 
     # a map configured for a device the loading machine lacks falls back to the default device
     som.device = "cuda"
