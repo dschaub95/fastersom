@@ -3,7 +3,6 @@ import pickle
 import numpy as np
 import pytest
 import torch
-from scipy.spatial.distance import cdist
 
 from fastersom import SOM
 
@@ -21,7 +20,15 @@ def data():
 
 
 def brute_force_distances(X, weights, metric):
-    return cdist(X.astype(np.float64), weights.astype(np.float64), "cityblock" if metric == "manhattan" else metric)
+    """Distance of every sample to every node in float64, by broadcasting."""
+    X, weights = X.astype(np.float64)[:, None], weights.astype(np.float64)[None]
+    if metric == "euclidean":
+        return np.sqrt(((X - weights) ** 2).sum(-1))
+    if metric == "manhattan":
+        return np.abs(X - weights).sum(-1)
+    if metric == "correlation":
+        X, weights = X - X.mean(-1, keepdims=True), weights - weights.mean(-1, keepdims=True)
+    return 1 - (X * weights).sum(-1) / (np.linalg.norm(X, axis=-1) * np.linalg.norm(weights, axis=-1))
 
 
 def random_init(n_rows, n_cols, n_features, seed=0):
