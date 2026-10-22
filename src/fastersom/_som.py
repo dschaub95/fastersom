@@ -158,11 +158,16 @@ class SOM:
         self._grid_sq_dist = torch.cdist(self._coords, self._coords) ** 2
 
     def _as_tensor(self, X: ArrayLike | torch.Tensor) -> torch.Tensor:
-        return torch.as_tensor(
-            X.detach() if isinstance(X, torch.Tensor) else np.ascontiguousarray(X),
-            dtype=torch.float32,
-            device=self._device,
-        )
+        if isinstance(X, torch.Tensor):
+            X = X.detach()
+        elif hasattr(X, "__dlpack__") and not isinstance(X, np.ndarray):  # e.g. CuPy, without leaving the GPU
+            try:
+                X = torch.from_dlpack(X)
+            except RuntimeError:  # torch cannot import negative strides
+                X = torch.from_dlpack(X.copy())
+        else:  # numpy refuses to export read-only arrays through DLPack
+            X = np.ascontiguousarray(X)
+        return torch.as_tensor(X, dtype=torch.float32, device=self._device)
 
     def _check_X(self, X: ArrayLike | torch.Tensor) -> torch.Tensor:
         data = self._as_tensor(X)
@@ -233,11 +238,14 @@ class SOM:
     def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         """Per-node score to minimise.
 
-        ||w||^2 - 2 x.w (euclidean, ||x||^2 dropped), the L1 distance (manhattan) or -x.w / ||w|| of the (for
-        correlation centred) vectors (cosine, correlation).
+        ||w - c||^2 - 2 (x - c).(w - c) with c the mean node (euclidean, ||x - c||^2 dropped; centring keeps a large
+        offset from cancelling), the L1 distance (manhattan) or -x.w / ||w|| of the (for correlation centred) vectors
+        (cosine, correlation).
         """
         if self.metric == "euclidean":
-            return torch.addmm((weights**2).sum(1), batch, weights.T, alpha=-2)
+            centre = weights.mean(0)
+            weights = weights - centre
+            return torch.addmm((weights**2).sum(1), batch - centre, weights.T, alpha=-2)
         if self.metric == "manhattan":
             return torch.cdist(batch, weights, p=1)
         weights = self._centre(weights)
@@ -277,8 +285,9 @@ class SOM:
         """Fits the map, starting from the initialisation given by init.
 
         Args:
-            X: Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like or torch tensor.
-                Any real values are fine; data is copied to the device once and stays there.
+            X: Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like, torch tensor
+                or DLPack array such as CuPy. Any real values are fine; data is copied to the device once and stays
+                there.
             y: Ignored.
 
         Returns:
