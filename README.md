@@ -54,13 +54,23 @@ so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for
 
 ## Benchmark
 
-480,000 x 34 pixels, 30 x 30 nodes, 10 epochs, fit time only (mean of seeds 0-2):
+480,000 x 34 pixels (the spatiomic tutorial's subsample), 30 x 30 nodes, 10 epochs, fit time (mean of seeds 0-2) and
+peak GPU memory including the data and the allocator cache, each configuration in its own process
+([`benchmarks/memory.py`](benchmarks/memory.py)):
 
-| implementation               | hardware          | fit time | quantization error |
-| ---------------------------- | ----------------- | -------- | ------------------ |
-| fastersom                    | NVIDIA A100       | 0.085 s  | 0.169              |
-| spatiomic (CuPy)             | NVIDIA A100       | 0.46 s   | 0.169              |
-| spatiomic (NumPy)            | 256-core CPU      | 40 s     | 0.169              |
+| implementation    | hardware     | batch size         | fit time | peak GPU memory | quantization error |
+| ----------------- | ------------ | ------------------ | -------- | --------------- | ------------------ |
+| fastersom         | NVIDIA A100  | default (298,261)  | 0.12 s   | 1150 MiB        | 0.168              |
+| fastersom         | NVIDIA A100  | 32,768             | 0.12 s   | 204 MiB         | 0.168              |
+| fastersom         | NVIDIA A100  | 8,096              | 0.20 s   | 118 MiB         | 0.168              |
+| spatiomic (CuPy)  | NVIDIA A100  | default (8,096)    | 0.46 s   | 340 MiB         | 0.169              |
+| spatiomic (CuPy)  | NVIDIA A100  | 65,536             | 0.41 s   | 2250 MiB        | 0.169              |
+| spatiomic (NumPy) | 256-core CPU | default            | 40 s     | -               | 0.169              |
+
+With less memory than spatiomic's default (204 vs 340 MiB), fastersom fits about 4x faster; at the same batch size it
+needs about a third of the memory and is about 2x faster. Beyond about 32,768 samples per batch neither library gets
+much faster, so on this small dataset fastersom's default batch size uses more memory for no gain; it only takes what
+is free and shrinks on a fuller GPU. The CPU row was measured separately.
 
 ## Algorithm
 
