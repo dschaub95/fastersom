@@ -133,6 +133,7 @@ class SOM:
 
     def __setstate__(self, state: dict) -> None:
         """Restores a pickled map on the configured device if available (cpu, cuda, mps), else the default one."""
+        state.setdefault("memory_fraction", None)  # pickled before 0.3
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -274,7 +275,8 @@ class SOM:
         """Distances from the scores of any number of nodes per sample, for every metric but euclidean."""
         if self.metric == "manhattan":
             return scores
-        return (1 + scores / self._centre(batch).norm(dim=1, keepdim=True)).clamp(0, 2)
+        # in place, as transform's scores hold a batch x nodes matrix; callers pass scores they no longer need
+        return scores.div_(self._centre(batch).norm(dim=1, keepdim=True)).add_(1).clamp_(0, 2)
 
     def _bmus(
         self, data: torch.Tensor, weights: torch.Tensor, return_distance: bool = True
@@ -330,6 +332,7 @@ class SOM:
             # in place, so large maps hold one nodes x nodes matrix at a time
             h = torch.cdist(self._coords, self._coords).square_().mul_(-0.5 / sigma**2).exp_()
             numerator, denominator = h @ sums, h @ counts
+            del h  # before the next epoch's BMU search and neighbourhood matrix
             weights = torch.where(denominator[:, None] > 0, numerator / denominator[:, None], weights)
         self._set_weights(weights)
         self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
@@ -381,7 +384,8 @@ class SOM:
         self._check_fitted()
         data = self._check_X(X)
         batch_size = self._batch_size_for(data)
-        distances = torch.empty(len(data), len(self._weights))  # on the CPU, as it can exceed device memory
+        # on the CPU, as it can exceed device memory
+        distances = torch.empty(len(data), len(self._weights), dtype=torch.float32, device="cpu")
         for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
             rows.copy_(self._distances(batch))
         return distances.numpy()
