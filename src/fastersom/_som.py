@@ -114,21 +114,8 @@ class SOM:
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
-        """Returns a fitted map with the given node weights, without training data.
-
-        The map behaves like ``SOM(n_rows, n_cols, n_epochs=0, init=weights, **kwargs).fit(X)``, except that
-        ``labels_`` is not set because there are no training samples. ``fit`` on it trains ``n_epochs`` (default 0)
-        epochs starting from ``weights``.
-
-        Args:
-            weights: Node weights, shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features).
-            n_rows: Number of grid rows.
-            n_cols: Number of grid columns.
-            **kwargs: Further constructor parameters, e.g. ``metric`` or ``device``.
-
-        Returns:
-            The fitted map.
-        """
+        """Returns a fitted map with the given weights (shapes as for init), like ``SOM(n_rows, n_cols, n_epochs=0,
+        init=weights, **kwargs).fit(X)`` but without data, so ``labels_`` is not set."""
         som = cls(n_rows, n_cols, init=weights, **{"n_epochs": 0, **kwargs})
         som._setup()
         som._set_weights(som._given_weights())
@@ -142,11 +129,7 @@ class SOM:
         return state
 
     def __setstate__(self, state: dict) -> None:
-        """Restores a pickled map on the configured device if available, else on the default device.
-
-        Availability is checked for cpu, cuda and mps; maps configured for other device types load on the default one.
-        A later fit uses the configured device, like any fit.
-        """
+        """Restores a pickled map on the configured device if available (cpu, cuda, mps), else the default one."""
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -207,8 +190,7 @@ class SOM:
         n_nodes = self.n_rows * self.n_cols
         if weights.shape[:-1] not in ((n_nodes,), (self.n_rows, self.n_cols)) or weights.shape[-1] == 0:
             raise ValueError(
-                f"init must have shape ({n_nodes}, n_features) or ({self.n_rows}, {self.n_cols}, n_features), "
-                f"got {tuple(weights.shape)}"
+                f"init must have shape (n_nodes, n_features) or (n_rows, n_cols, ...), got {weights.shape}"
             )
         if not torch.isfinite(weights).all():
             raise ValueError("init contains NaN or infinite values")
@@ -226,15 +208,10 @@ class SOM:
             weights = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
             weights /= np.linalg.norm(weights, axis=-1, keepdims=True)
             return torch.as_tensor(weights.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
-        candidates = torch.arange(len(data), device=self._device)
         has_bmu = self._has_bmu(data)
-        if has_bmu is not None:
-            candidates = candidates[has_bmu]
+        candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
         if len(candidates) == 0:
-            raise ValueError(
-                f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU "
-                "(non-zero for cosine, non-constant for correlation)"
-            )
+            raise ValueError(f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU")
         picks = rng.choice(len(candidates), n_nodes, replace=len(candidates) < n_nodes)
         return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
 
@@ -331,11 +308,6 @@ class SOM:
 
     @overload
     def predict(self, X: ArrayLike | torch.Tensor, return_distance: Literal[True]) -> tuple[np.ndarray, np.ndarray]: ...
-
-    @overload
-    def predict(
-        self, X: ArrayLike | torch.Tensor, return_distance: bool
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]: ...
 
     def predict(
         self, X: ArrayLike | torch.Tensor, return_distance: bool = False
