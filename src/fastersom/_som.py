@@ -64,8 +64,10 @@ class SOM:
             0.1 * sigma_initial.
         init: ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
             normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
-            shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. to
-            continue training from another map's ``weights_``.
+            shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
+            map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
+            largely retrains the map; to continue training, pass a small sigma_initial such as the previous
+            sigma_final.
         metric: ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
             (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
             the nodes to the neighbourhood-weighted mean of the raw samples (not the median for manhattan, nor the

@@ -40,8 +40,10 @@ Options:
   correlation). Zero-norm samples under cosine and constant samples under correlation have no BMU: they get label -1
   and distance NaN in `predict`, distance 1 in `transform`, and are left out of the update and the error measures.
 - `init="sample"` initialises the nodes from random samples instead of seeded random unit vectors. An array of shape
-  `(n_rows * n_cols, d)` or `(n_rows, n_cols, d)` gives the initial weights instead, e.g. to continue training
-  (`SOM(init=som.weights_).fit(X)`); with `n_epochs=0`, `fit` keeps them unchanged.
+  `(n_rows * n_cols, d)` or `(n_rows, n_cols, d)` gives the initial weights instead, e.g. for a warm start
+  (`SOM(init=som.weights_).fit(X)`); with `n_epochs=0`, `fit` keeps them unchanged. The sigma schedule restarts at
+  `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small
+  `sigma_initial`, e.g. the previous map's `sigma_final`.
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce spatiomic.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats) without changing the algorithm.
 
