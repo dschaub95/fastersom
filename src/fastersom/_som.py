@@ -79,8 +79,11 @@ class SOM:
         batch_size: Samples processed at once in BMU search, aggregation, predict and transform. Affects memory
             (about batch_size x n_nodes floats) and speed only. Each epoch's update is the same up to float
             summation order, but over several epochs such rounding differences (as between devices) can flip
-            near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults to 65536 on GPU and 8192
-            on CPU.
+            near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults to 8192 on CPU and on GPUs
+            to 2^28 / n_nodes (where speed levels off), fewer if that does not fit in memory_fraction of the free GPU
+            memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
+        memory_fraction: Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
+            on CUDA and 0.5 on MPS, whose memory the system and other apps share.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -100,6 +103,7 @@ class SOM:
         random_state: int | None = None,
         device: str | torch.device | None = None,
         batch_size: int | None = None,
+        memory_fraction: float | None = None,
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -111,6 +115,7 @@ class SOM:
         self.random_state = random_state
         self.device = device
         self.batch_size = batch_size
+        self.memory_fraction = memory_fraction
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -145,10 +150,11 @@ class SOM:
                 raise ValueError(f"{name} must be an integer >= {minimum}, got {getattr(self, name)!r}")
         if self.batch_size is not None and not _is_int(self.batch_size, 1):
             raise ValueError(f"batch_size must be None or an integer >= 1, got {self.batch_size!r}")
+        if self.memory_fraction is not None and not 0 < self.memory_fraction <= 1:
+            raise ValueError(f"memory_fraction must be None or in (0, 1], got {self.memory_fraction!r}")
         self._device = torch.device(self.device) if self.device is not None else _default_device()
         if fall_back and not _is_available(self._device):
             self._device = _default_device()
-        self._batch_size = self.batch_size or (8192 if self._device.type == "cpu" else 1 << 16)
         self._sigma0 = ceil(min(self.n_rows, self.n_cols) / 2) / 2 if self.sigma_initial is None else self.sigma_initial
         self._sigma1 = 0.1 * self._sigma0 if self.sigma_final is None else self.sigma_final
         if not all(isfinite(sigma) and sigma > 0 for sigma in (self._sigma0, self._sigma1)):
@@ -178,6 +184,21 @@ class SOM:
         if not torch.isfinite(torch.stack(torch.aminmax(data))).all():  # unlike isfinite(data), without a copy of X
             raise ValueError("X contains NaN or infinite values")
         return data
+
+    def _batch_size_for(self, data: torch.Tensor) -> int:
+        if self.batch_size is not None:
+            return self.batch_size
+        if self._device.type == "cuda":
+            cached = torch.cuda.memory_reserved(self._device) - torch.cuda.memory_allocated(self._device)
+            free, fraction = torch.cuda.mem_get_info(self._device)[0] + cached, 0.9
+        elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
+            free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
+        else:
+            return 8192 if self._device.type == "cpu" else 1 << 16
+        fraction = fraction if self.memory_fraction is None else self.memory_fraction
+        n_nodes = self.n_rows * self.n_cols
+        # BMU search holds at most about 2 floats per sample and node, plus copies of the batch
+        return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + data.shape[1]))))
 
     def _check_fitted(self) -> None:
         if not hasattr(self, "weights_"):
@@ -262,7 +283,7 @@ class SOM:
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """BMU and, if return_distance, distance to it per sample; -1 and NaN for samples without a BMU."""
         bmus, distances = [], []
-        for batch in data.split(self._batch_size):
+        for batch in data.split(self._batch_size_for(data)):
             score, bmu = self._scores(batch, weights).min(1)
             bmus.append(bmu)
             if not return_distance:
@@ -297,11 +318,11 @@ class SOM:
             self.__dict__.pop(attr, None)
         data = self._check_X(X)
         weights = self._init_weights(data)
-        n_nodes = weights.shape[0]
+        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data)
         for t in range(self.n_epochs):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
             sums, counts = torch.zeros_like(weights), weights.new_zeros(n_nodes)
-            for batch in data.split(self._batch_size):
+            for batch in data.split(batch_size):
                 bmus = self._scores(batch, weights).argmin(1)
                 keep = self._has_bmu(batch)  # samples without a BMU do not contribute
                 if keep is not None:
@@ -361,8 +382,9 @@ class SOM:
         """
         self._check_fitted()
         data = self._check_X(X)
+        batch_size = self._batch_size_for(data)
         distances = torch.empty(len(data), len(self._weights))  # on the CPU, as it can exceed device memory
-        for batch, rows in zip(data.split(self._batch_size), distances.split(self._batch_size), strict=True):
+        for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
             rows.copy_(self._distances(batch))
         return distances.numpy()
 
@@ -388,7 +410,7 @@ class SOM:
         nodes = torch.cat(
             [
                 self._scores(batch, self._weights).topk(2, dim=1, largest=False).indices
-                for batch in data.split(self._batch_size)
+                for batch in data.split(self._batch_size_for(data))
             ]
         )
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)

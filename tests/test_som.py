@@ -138,6 +138,7 @@ def test_invalid_parameters(data):
         (dict(n_cols=2.5), "n_cols"),
         (dict(n_epochs=-1), "n_epochs"),
         (dict(batch_size=0), "batch_size"),
+        (dict(memory_fraction=0), "memory_fraction"),
     ]:
         with pytest.raises(ValueError, match=match):
             SOM(**{"n_rows": 5, "n_cols": 4, **kwargs}, device=CPU).fit(data)
