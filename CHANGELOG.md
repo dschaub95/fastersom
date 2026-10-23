@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `verbose=True` shows a tqdm progress bar over the epochs of `fit`, with an estimate of the remaining time. tqdm is a
+  new dependency.
 - On MPS, the euclidean BMU search adds the node norms within the matrix product, as a column of ones in the samples
   and a column of node norms in the weights, instead of in place after it. This extra pass over the scores made 0.3.1
   slower than `addmm` from 100 x 100 maps on, whose default batches are small (`fit` 7.4 s instead of 2.2 s for
