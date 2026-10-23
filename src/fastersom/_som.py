@@ -93,6 +93,11 @@ class SOM:
             on CUDA and 0.5 on MPS, whose memory the system and other apps share.
         verbose: Whether fit shows a progress bar over the epochs, with an estimate of the remaining time. On GPUs, it
             then waits for each epoch to finish before starting the next.
+        deterministic: Whether fit gives the same map in every run on CUDA and MPS, whose atomic additions of the
+            per-node sums otherwise vary in order, so that near-tied BMUs can flip between runs. The sums then take a
+            matrix product with a one-hot nodes x batch matrix, which on MPS makes fit 1.2-1.8x slower. Also used
+            when ``torch.use_deterministic_algorithms(True)`` is set. The CPU is always deterministic. Maps from
+            different devices still differ by float rounding.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -114,6 +119,7 @@ class SOM:
         batch_size: int | None = None,
         memory_fraction: float | None = None,
         verbose: bool = False,
+        deterministic: bool = False,
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -127,6 +133,7 @@ class SOM:
         self.batch_size = batch_size
         self.memory_fraction = memory_fraction
         self.verbose = verbose
+        self.deterministic = deterministic
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -148,6 +155,7 @@ class SOM:
         """Restores a pickled map on the configured device if available (cpu, cuda, mps), else the default one."""
         state.setdefault("memory_fraction", None)  # pickled before 0.3
         state.setdefault("verbose", False)  # pickled before 0.3.2
+        state.setdefault("deterministic", False)  # pickled before 0.3.2
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -353,6 +361,9 @@ class SOM:
         data = self._check_X(X)
         weights = self._init_weights(data)
         n_nodes, batch_size = weights.shape[0], self._batch_size_for(data)
+        deterministic = self._device.type != "cpu" and (
+            self.deterministic or torch.are_deterministic_algorithms_enabled()
+        )
         for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
             sums, counts = torch.zeros_like(weights), torch.zeros(n_nodes, dtype=torch.long, device=weights.device)
@@ -361,7 +372,10 @@ class SOM:
                 keep = self._has_bmu(batch)  # samples without a BMU do not contribute
                 if keep is not None:
                     batch, bmus = batch[keep], bmus[keep]
-                sums.index_add_(0, bmus, batch)
+                if deterministic:  # a matrix product sums in a fixed order, unlike index_add_'s atomic additions
+                    sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
+                else:
+                    sums.index_add_(0, bmus, batch)
                 counts.index_add_(0, bmus, torch.ones_like(bmus))
             smoothed = self._smooth(torch.cat([sums, counts[:, None].float()], 1), sigma)
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
