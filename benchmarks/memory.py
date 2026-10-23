@@ -7,9 +7,9 @@ CuPy and torchsom installed into temporary environments on top of this project's
     uv run benchmarks/memory.py                                   # every configuration
     uv run benchmarks/memory.py --library fastersom --device cpu  # a part of them
 
-Set ``CUPY`` to the CuPy wheel matching your CUDA version (default cupy-cuda12x). Peak memory includes the data on the
-GPU and the allocator cache (torch's reserved memory, CuPy's memory pool). XPySom runs with the parameters spatiomic's
-``so.dimension.som`` passes it, and torchsom with spatiomic's neighbourhood schedule.
+Set ``CUPY`` to the CuPy wheel matching your CUDA version (default cupy-cuda12x==14.2.0). Peak memory includes the
+data on the GPU and the allocator cache (torch's reserved memory, CuPy's memory pool). XPySom runs with the parameters
+spatiomic's ``so.dimension.som`` passes it, and torchsom with spatiomic's neighbourhood schedule.
 """
 
 import argparse
@@ -45,7 +45,7 @@ CONFIGS = [
     ("fastersom", "cpu", None, 100),
 ]
 # packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
-PACKAGES = {"fastersom": [], "xpysom": ["xpysom"], "torchsom": ["torchsom"]}
+PACKAGES = {"fastersom": [], "xpysom": ["xpysom==1.0.7"], "torchsom": ["torchsom==1.3.1"]}
 
 
 def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndarray, seed: int):
@@ -151,7 +151,8 @@ def main() -> None:
         if result.returncode:
             sys.exit(result.stderr)
 
-    cupy = os.environ.get("CUPY", "cupy-cuda12x")
+    cupy = os.environ.get("CUPY", "cupy-cuda12x==14.2.0")
+    failed = 0
     for library, device, batch_size, size in CONFIGS:
         if library not in args.library or device not in args.device or size not in args.size:
             continue
@@ -159,9 +160,11 @@ def main() -> None:
         config = [library, device, str(batch_size or 0), str(size)]
         result = uv_run(packages, Path(__file__), "--run", *config, str(args.data))
         if result.returncode:
+            failed += 1
             print(f"{' '.join(config)} failed:\n{result.stderr}", file=sys.stderr)
         else:
             print(result.stdout.strip().splitlines()[-1], flush=True)
+    sys.exit(f"{failed} configurations failed" if failed else 0)
 
 
 if __name__ == "__main__":
