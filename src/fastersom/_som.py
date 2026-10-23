@@ -265,6 +265,10 @@ class SOM:
         if self.metric == "euclidean":
             centre = weights.mean(0)
             weights = weights - centre
+            if batch.device.type == "mps":
+                # MPS's addmm expands the bias to a second batch x nodes matrix, which is up to ~5x slower at large
+                # batches; on CUDA addmm fuses the bias into the matmul (cuBLASLt epilogue), so it stays there
+                return ((batch - centre) @ (-2 * weights).T).add_((weights**2).sum(1))
             return torch.addmm((weights**2).sum(1), batch - centre, weights.T, alpha=-2)
         if self.metric == "manhattan":
             return torch.cdist(batch, weights, p=1)

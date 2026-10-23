@@ -6,6 +6,9 @@
   nodes x nodes neighbourhood matrix, which took 400 MB for a 100 x 100 map and 6.4 GB for a 200 x 200 map. The update
   is the same up to float32 rounding and costs O(nodes * (n_rows + n_cols)) instead of O(nodes^2).
 - `fit` counts the samples per node without `torch.bincount`, which waited for the GPU once per batch on CUDA.
+- On MPS, the euclidean BMU search uses a matrix product plus an in-place add instead of `torch.addmm`, which on MPS
+  expands the node norms to a second batch x nodes matrix: `fit` and `predict` are about 4x faster on small and
+  medium maps (1.7x on 60 x 60) and the BMU search needs half the memory. CUDA and CPU keep `addmm`.
 
 ## 0.3.0 (2026-10-22)
 
