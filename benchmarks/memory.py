@@ -1,9 +1,9 @@
 """Fit time and peak GPU memory of fastersom, XPySom and torchsom at several map and batch sizes.
 
 Runs on the spatiomic tutorial's preprocessed subsample (480,000 x 34 pixels), which the first run downloads and
-prepares (see ``data.py``). Every configuration runs in its own process limited to ``--cpus`` cores (default 16), so
-the memory peaks do not mix, with XPySom, CuPy and torchsom installed into temporary environments on top of this
-project's:
+prepares (see ``data.py``), and on 5,000,000 x 60 synthetic samples for a large 200 x 200 map. Every configuration runs
+in its own process limited to ``--cpus`` cores (default 16), so the memory peaks do not mix, with XPySom, CuPy and
+torchsom installed into temporary environments on top of this project's:
 
     uv run benchmarks/memory.py                                   # every configuration
     uv run benchmarks/memory.py --library fastersom --device cpu  # a part of them
@@ -29,7 +29,8 @@ HERE = Path(__file__).parent
 DATA = HERE / "data" / "subsample_processed.npy"
 EPOCHS = 10
 SEEDS = [0, 1, 2]
-# (library, device, batch size, map size); None is fastersom's default batch size, chosen from the free memory on GPUs
+# (library, device, batch size, map size); None is fastersom's default batch size, chosen from the free memory on GPUs.
+# 200 x 200 maps run on the synthetic data, the others on the tutorial's.
 CONFIGS = [
     ("fastersom", "cuda", None, 30),
     ("fastersom", "cuda", 32768, 30),
@@ -44,6 +45,9 @@ CONFIGS = [
     ("fastersom", "cuda", 8096, 100),
     ("xpysom", "cuda", 8096, 100),
     ("fastersom", "cpu", None, 100),
+    ("fastersom", "cuda", None, 200),
+    ("fastersom", "cuda", 8096, 200),
+    ("xpysom", "cuda", 8096, 200),
 ]
 # packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
 PACKAGES = {"fastersom": [], "xpysom": ["xpysom==1.0.7"], "torchsom": ["torchsom==1.3.1"]}
@@ -90,12 +94,22 @@ def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndar
     return som.weights.detach().reshape(-1, X.shape[1])
 
 
+def synthetic(n_samples: int = 5_000_000, n_features: int = 60, n_clusters: int = 50) -> np.ndarray:
+    """Gaussian clusters in [0, 1]^n_features, like normalised pixel intensities."""
+    rng = np.random.default_rng(0)
+    centres = rng.random((n_clusters, n_features), dtype=np.float32)
+    X = rng.standard_normal((n_samples, n_features), dtype=np.float32)
+    X *= 0.05
+    X += centres[rng.integers(n_clusters, size=n_samples)]
+    return np.clip(X, 0, 1, out=X)
+
+
 def run(library: str, device: str, batch_size: int | None, size: int, path: str) -> dict:
     import torch
 
     from fastersom import SOM
 
-    X = np.load(path).astype(np.float32)
+    X = synthetic() if size == 200 else np.load(path).astype(np.float32)
     cuda, pool = device == "cuda", None
     if cuda and library == "xpysom":
         import cupy
@@ -115,10 +129,10 @@ def run(library: str, device: str, batch_size: int | None, size: int, path: str)
         if cuda:
             torch.cuda.synchronize()
         times.append(time.perf_counter() - start)
-    error = SOM.from_weights(weights, size, size, device="cpu").quantization_error(X)
     peak = None
     if cuda:  # CuPy's pool keeps every block it allocated
         peak = round(((pool.total_bytes() if pool else 0) + torch.cuda.max_memory_reserved()) / 2**20)
+    error = SOM.from_weights(weights, size, size, device=device).quantization_error(X)
     return {
         "library": library,
         "device": device,
@@ -142,9 +156,10 @@ def main() -> None:
     parser.add_argument("--data", type=Path, default=DATA, help="preprocessed subsample, prepared if missing")
     parser.add_argument("--library", nargs="+", choices=list(PACKAGES), default=list(PACKAGES))
     parser.add_argument("--device", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
-    parser.add_argument("--size", nargs="+", type=int, default=[30, 100], help="map side lengths")
+    parser.add_argument("--size", nargs="+", type=int, choices=[30, 100, 200], default=[30, 100, 200])
     parser.add_argument("--cpus", type=int, default=16, help="CPU cores and threads per configuration")
     args = parser.parse_args()
+    configs = [c for c in CONFIGS if c[0] in args.library and c[1] in args.device and c[3] in args.size]
 
     # the child processes inherit the CPU affinity (Linux only) and the thread counts
     cpus = min(args.cpus, os.cpu_count())
@@ -154,7 +169,7 @@ def main() -> None:
     for name in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]:
         os.environ[name] = str(cpus)
 
-    if not args.data.exists():
+    if not args.data.exists() and any(size != 200 for *_, size in configs):
         print(f"preparing {args.data}", file=sys.stderr)
         args.data.parent.mkdir(parents=True, exist_ok=True)
         result = uv_run([SPATIOMIC], HERE / "data.py", str(args.data))
@@ -163,9 +178,7 @@ def main() -> None:
 
     cupy = os.environ.get("CUPY", "cupy-cuda12x==14.2.0")
     failed = 0
-    for library, device, batch_size, size in CONFIGS:
-        if library not in args.library or device not in args.device or size not in args.size:
-            continue
+    for library, device, batch_size, size in configs:
         packages = PACKAGES[library] + ([cupy] if library == "xpysom" and device == "cuda" else [])
         config = [library, device, str(batch_size or 0), str(size)]
         result = uv_run(packages, Path(__file__), "--run", *config, str(args.data))
