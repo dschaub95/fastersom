@@ -48,6 +48,7 @@ CONFIGS = [
     ("fastersom", "cuda", None, 200),
     ("fastersom", "cuda", 8096, 200),
     ("xpysom", "cuda", 8096, 200),
+    ("fastersom", "cpu", None, 200),  # one fit without a warm-up, as it takes over an hour
 ]
 # packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
 PACKAGES = {"fastersom": [], "xpysom": ["xpysom==1.0.7"], "torchsom": ["torchsom==1.3.1"]}
@@ -116,7 +117,8 @@ def run(library: str, device: str, batch_size: int | None, size: int, path: str)
 
         pool = cupy.get_default_memory_pool()
     times = []
-    for seed in [SEEDS[0], *SEEDS]:  # the first run warms up
+    seeds = SEEDS[:1] if size == 200 and not cuda else [SEEDS[0], *SEEDS]  # the first of several runs warms up
+    for seed in seeds:
         if pool:
             pool.free_all_blocks()
         if cuda:
@@ -139,7 +141,8 @@ def run(library: str, device: str, batch_size: int | None, size: int, path: str)
         "hardware": torch.cuda.get_device_name() if cuda else f"{torch.get_num_threads()} CPU threads",
         "nodes": f"{size}x{size}",
         "batch_size": batch_size or "default",
-        "fit_s": round(float(np.mean(times[1:])), 3),
+        "fit_s": round(float(np.mean(times[1:] or times)), 3),
+        "fits": len(times[1:] or times),
         "peak_gpu_MiB": peak,
         "quantization_error": round(error, 3),
     }
