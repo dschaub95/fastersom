@@ -1,23 +1,29 @@
 """Fit time and peak GPU memory of fastersom, XPySom and torchsom at several map and batch sizes.
 
-Needs XPySom, CuPy and torchsom besides fastersom, and the spatiomic tutorial's preprocessed subsample
-(480,000 x 34 pixels) as a .npy file. Every configuration runs in its own process, so the memory peaks do not mix:
+Needs the spatiomic tutorial's preprocessed subsample (480,000 x 34 pixels) as a .npy file. Every configuration runs
+in its own process, so the memory peaks do not mix, with XPySom, CuPy and torchsom installed into temporary
+environments on top of this project's:
 
-    python benchmarks/memory.py subsample_processed.npy
+    uv run benchmarks/memory.py --data subsample_processed.npy                                   # every configuration
+    uv run benchmarks/memory.py --data subsample_processed.npy --library fastersom --device cpu  # a part of them
 
-Peak memory includes the data on the GPU and the allocator cache (torch's reserved memory, CuPy's memory pool).
-XPySom runs with the parameters spatiomic's ``so.dimension.som`` passes it, and torchsom with spatiomic's neighbourhood
-schedule.
+Set ``CUPY`` to the CuPy wheel matching your CUDA version (default cupy-cuda12x). Peak memory includes the data on the
+GPU and the allocator cache (torch's reserved memory, CuPy's memory pool). XPySom runs with the parameters spatiomic's
+``so.dimension.som`` passes it, and torchsom with spatiomic's neighbourhood schedule.
 """
 
+import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from math import ceil
+from pathlib import Path
 
 import numpy as np
 
+HERE = Path(__file__).parent
 EPOCHS = 10
 SEEDS = [0, 1, 2]
 # (library, device, batch size, map size); None is fastersom's default batch size, chosen from the free memory on GPUs
@@ -36,6 +42,8 @@ CONFIGS = [
     ("xpysom", "cuda", 8096, 100),
     ("fastersom", "cpu", None, 100),
 ]
+# packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
+PACKAGES = {"fastersom": [], "xpysom": ["xpysom"], "torchsom": ["torchsom"]}
 
 
 def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndarray, seed: int):
@@ -46,9 +54,12 @@ def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndar
         som = SOM(size, size, n_epochs=EPOCHS, random_state=seed, device=device, batch_size=batch_size)
         return som.fit(X).weights_
     if library == "xpysom":
-        import cupy
         from xpysom import XPySom
 
+        if device == "cuda":
+            import cupy as xp
+        else:
+            xp = np
         som = XPySom(
             size,
             size,
@@ -58,7 +69,7 @@ def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndar
             learning_rate=0.2,
             learning_rateN=3e-3,
             neighborhood_function="gaussian",
-            xp=cupy if device == "cuda" else np,
+            xp=xp,
             n_parallel=batch_size,
             random_seed=seed,
         )
@@ -77,41 +88,76 @@ def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndar
 
 
 def run(library: str, device: str, batch_size: int | None, size: int, path: str) -> dict:
-    import cupy
     import torch
 
     from fastersom import SOM
 
     X = np.load(path).astype(np.float32)
-    pool = cupy.get_default_memory_pool()
+    cuda, pool = device == "cuda", None
+    if cuda and library == "xpysom":
+        import cupy
+
+        pool = cupy.get_default_memory_pool()
     times = []
     for seed in [SEEDS[0], *SEEDS]:  # the first run warms up
-        pool.free_all_blocks()
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        if pool:
+            pool.free_all_blocks()
+        if cuda:
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
         start = time.perf_counter()
         weights = fit(library, device, batch_size, size, X, seed)
-        cupy.cuda.Device().synchronize()
-        torch.cuda.synchronize()
+        if pool:
+            cupy.cuda.Device().synchronize()
+        if cuda:
+            torch.cuda.synchronize()
         times.append(time.perf_counter() - start)
-    peak = pool.total_bytes() + torch.cuda.max_memory_reserved()  # CuPy's pool keeps every block it allocated
     error = SOM.from_weights(weights, size, size, device="cpu").quantization_error(X)
+    peak = None
+    if cuda:  # CuPy's pool keeps every block it allocated
+        peak = round(((pool.total_bytes() if pool else 0) + torch.cuda.max_memory_reserved()) / 2**20)
     return {
         "library": library,
         "device": device,
+        "hardware": torch.cuda.get_device_name() if cuda else f"{os.cpu_count()}-core CPU",
         "nodes": f"{size}x{size}",
         "batch_size": batch_size or "default",
         "fit_s": round(float(np.mean(times[1:])), 3),
-        "peak_gpu_MiB": round(peak / 2**20) if device == "cuda" else None,
+        "peak_gpu_MiB": peak,
         "quantization_error": round(error, 3),
     }
 
 
+def uv_run(packages: list[str], script: Path, *args: str) -> subprocess.CompletedProcess:
+    """Runs the script in a temporary environment of this project's plus the given packages."""
+    command = [os.environ.get("UV", "uv"), "run", "--project", str(HERE.parent), *(f"--with={p}" for p in packages)]
+    return subprocess.run([*command, "python", str(script), *args], capture_output=True, text=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--data", type=Path, required=True, help="preprocessed subsample")
+    parser.add_argument("--library", nargs="+", choices=list(PACKAGES), default=list(PACKAGES))
+    parser.add_argument("--device", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
+    parser.add_argument("--size", nargs="+", type=int, default=[30, 100], help="map side lengths")
+    args = parser.parse_args()
+
+    cupy = os.environ.get("CUPY", "cupy-cuda12x")
+    for library, device, batch_size, size in CONFIGS:
+        if library not in args.library or device not in args.device or size not in args.size:
+            continue
+        packages = PACKAGES[library] + ([cupy] if library == "xpysom" and device == "cuda" else [])
+        config = [library, device, str(batch_size or 0), str(size)]
+        result = uv_run(packages, Path(__file__), "--run", *config, str(args.data))
+        if result.returncode:
+            print(f"{' '.join(config)} failed:\n{result.stderr}", file=sys.stderr)
+        else:
+            print(result.stdout.strip().splitlines()[-1], flush=True)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 6:  # one configuration, in a child process
-        library, device, batch_size, size, path = sys.argv[1:]
+    if sys.argv[1:2] == ["--run"]:  # one configuration, in a child process
+        library, device, batch_size, size, path = sys.argv[2:]
         print(json.dumps(run(library, device, int(batch_size) or None, int(size), path)))
     else:
-        for library, device, batch_size, size in CONFIGS:
-            command = [sys.executable, __file__, library, device, str(batch_size or 0), str(size), sys.argv[1]]
-            print(subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1])
+        main()
