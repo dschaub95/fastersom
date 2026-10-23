@@ -49,6 +49,9 @@ Options:
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5
   on MPS) of the free GPU memory, so it rarely needs tuning.
 - `verbose=True` shows a progress bar over the epochs of `fit`, with an estimate of the remaining time.
+- `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, whose atomic additions otherwise
+  vary in order (1.2-1.8x slower on MPS). It is also used under `torch.use_deterministic_algorithms(True)`. The CPU is
+  always deterministic; maps from different devices still differ by float rounding.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.

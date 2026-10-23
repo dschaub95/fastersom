@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, by summing the samples per node
+  with a matrix product instead of atomic additions, whose order varies (1.2-1.8x slower on MPS). It is also used
+  under `torch.use_deterministic_algorithms(True)`, which previously raised an error on MPS.
 - `verbose=True` shows a tqdm progress bar over the epochs of `fit`, with an estimate of the remaining time. tqdm is a
   new dependency.
 - On MPS, the euclidean BMU search adds the node norms within the matrix product, as a column of ones in the samples

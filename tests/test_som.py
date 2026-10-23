@@ -325,7 +325,7 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[0], labels)
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[1], distances)
     state = som.__getstate__()
-    del state["memory_fraction"], state["verbose"]  # as pickled by 0.2
+    del state["memory_fraction"], state["verbose"], state["deterministic"]  # as pickled by 0.2
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
     np.testing.assert_array_equal(loaded.predict(data), labels)
@@ -342,24 +342,42 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.fit(data).weights_, som.weights_)
 
 
-@pytest.mark.parametrize(
-    "device",
-    [
-        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")),
-        pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")),
-    ],
-)
+GPUS = [
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")),
+    pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")),
+]
+
+
+@pytest.mark.parametrize("device", GPUS)
 @pytest.mark.parametrize("metric", METRICS)
-def test_gpu_matches_cpu(data, metric, device):
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_gpu_matches_cpu(data, metric, device, deterministic):
     kwargs = dict(n_rows=6, n_cols=6, metric=metric, random_state=0)
     cpu = SOM(n_epochs=1, device=CPU, **kwargs).fit(data)
-    gpu = SOM(n_epochs=1, device=device, **kwargs).fit(data)
+    gpu = SOM(n_epochs=1, device=device, deterministic=deterministic, **kwargs).fit(data)
     np.testing.assert_allclose(gpu.weights_, cpu.weights_, atol=1e-5)
     np.testing.assert_allclose(gpu.transform(data), cpu.transform(data), atol=1e-4)
     cpu = SOM(n_epochs=3, device=CPU, **kwargs).fit(data)
-    gpu = SOM(n_epochs=3, device=device, **kwargs).fit(data)
+    gpu = SOM(n_epochs=3, device=device, deterministic=deterministic, **kwargs).fit(data)
     assert (gpu.labels_ == cpu.labels_).mean() > 0.95
     assert gpu.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
+
+
+@pytest.mark.parametrize("device", GPUS)
+def test_deterministic(device):
+    # many samples per node, so that the order of atomic additions varies between runs without deterministic
+    X = np.random.default_rng(0).normal(size=(200_000, 6)).astype(np.float32)
+    kwargs = dict(n_rows=4, n_cols=4, n_epochs=3, random_state=0, device=device)
+    weights = SOM(deterministic=True, **kwargs).fit(X).weights_
+    for _ in range(3):
+        np.testing.assert_array_equal(SOM(deterministic=True, **kwargs).fit(X).weights_, weights)
+
+    previous = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        np.testing.assert_array_equal(SOM(**kwargs).fit(X).weights_, weights)
+    finally:
+        torch.use_deterministic_algorithms(previous)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
