@@ -334,31 +334,24 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.fit(data).weights_, som.weights_)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize(
+    "device",
+    [
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")),
+        pytest.param("mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")),
+    ],
+)
 @pytest.mark.parametrize("metric", METRICS)
-def test_cuda_matches_cpu(data, metric):
+def test_gpu_matches_cpu(data, metric, device):
     kwargs = dict(n_rows=6, n_cols=6, metric=metric, random_state=0)
     cpu = SOM(n_epochs=1, device=CPU, **kwargs).fit(data)
-    cuda = SOM(n_epochs=1, device="cuda", **kwargs).fit(data)
-    np.testing.assert_allclose(cuda.weights_, cpu.weights_, atol=1e-5)
-    np.testing.assert_allclose(cuda.transform(data), cpu.transform(data), atol=1e-4)
+    gpu = SOM(n_epochs=1, device=device, **kwargs).fit(data)
+    np.testing.assert_allclose(gpu.weights_, cpu.weights_, atol=1e-5)
+    np.testing.assert_allclose(gpu.transform(data), cpu.transform(data), atol=1e-4)
     cpu = SOM(n_epochs=3, device=CPU, **kwargs).fit(data)
-    cuda = SOM(n_epochs=3, device="cuda", **kwargs).fit(data)
-    assert (cuda.labels_ == cpu.labels_).mean() > 0.95
-    assert cuda.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
-
-
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
-def test_mps_matches_cpu(data):
-    kwargs = dict(n_rows=6, n_cols=6, random_state=0)
-    cpu = SOM(n_epochs=1, device=CPU, **kwargs).fit(data)
-    mps = SOM(n_epochs=1, device="mps", **kwargs).fit(data)
-    np.testing.assert_allclose(mps.weights_, cpu.weights_, atol=1e-5)
-    np.testing.assert_array_equal(mps.predict(data), cpu.predict(data))
-    cpu = SOM(n_epochs=3, device=CPU, **kwargs).fit(data)
-    mps = SOM(n_epochs=3, device="mps", **kwargs).fit(data)
-    assert (mps.labels_ == cpu.labels_).mean() > 0.95
-    assert mps.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
+    gpu = SOM(n_epochs=3, device=device, **kwargs).fit(data)
+    assert (gpu.labels_ == cpu.labels_).mean() > 0.95
+    assert gpu.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
