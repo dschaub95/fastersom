@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- On MPS, the euclidean BMU search adds the node norms within the matrix product, as a column of ones in the samples
+  and a column of node norms in the weights, instead of in place after it. This extra pass over the scores made 0.3.1
+  slower than `addmm` from 100 x 100 maps on, whose default batches are small (`fit` 7.4 s instead of 2.2 s for
+  100 x 100, 16.3 s instead of 5.4 s for 150 x 150, 480,000 x 34 samples). `fit` and `predict` are now 1.6-3.3x faster
+  than in 0.3.1 on every map size and as fast as `addmm` on large maps.
+
 ## 0.3.1 (2026-10-23)
 
 - `fit` applies the gaussian neighbourhood along the grid rows and columns separately instead of building the
