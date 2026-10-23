@@ -1,11 +1,11 @@
 """Fit time and peak GPU memory of fastersom, XPySom and torchsom at several map and batch sizes.
 
-Needs the spatiomic tutorial's preprocessed subsample (480,000 x 34 pixels) as a .npy file. Every configuration runs
-in its own process, so the memory peaks do not mix, with XPySom, CuPy and torchsom installed into temporary
-environments on top of this project's:
+Runs on the spatiomic tutorial's preprocessed subsample (480,000 x 34 pixels), which the first run downloads and
+prepares (see ``data.py``). Every configuration runs in its own process, so the memory peaks do not mix, with XPySom,
+CuPy and torchsom installed into temporary environments on top of this project's:
 
-    uv run benchmarks/memory.py --data subsample_processed.npy                                   # every configuration
-    uv run benchmarks/memory.py --data subsample_processed.npy --library fastersom --device cpu  # a part of them
+    uv run benchmarks/memory.py                                   # every configuration
+    uv run benchmarks/memory.py --library fastersom --device cpu  # a part of them
 
 Set ``CUPY`` to the CuPy wheel matching your CUDA version (default cupy-cuda12x). Peak memory includes the data on the
 GPU and the allocator cache (torch's reserved memory, CuPy's memory pool). XPySom runs with the parameters spatiomic's
@@ -22,8 +22,10 @@ from math import ceil
 from pathlib import Path
 
 import numpy as np
+from data import SPATIOMIC  # benchmarks/data.py
 
 HERE = Path(__file__).parent
+DATA = HERE / "data" / "subsample_processed.npy"
 EPOCHS = 10
 SEEDS = [0, 1, 2]
 # (library, device, batch size, map size); None is fastersom's default batch size, chosen from the free memory on GPUs
@@ -136,11 +138,18 @@ def uv_run(packages: list[str], script: Path, *args: str) -> subprocess.Complete
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--data", type=Path, required=True, help="preprocessed subsample")
+    parser.add_argument("--data", type=Path, default=DATA, help="preprocessed subsample, prepared if missing")
     parser.add_argument("--library", nargs="+", choices=list(PACKAGES), default=list(PACKAGES))
     parser.add_argument("--device", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
     parser.add_argument("--size", nargs="+", type=int, default=[30, 100], help="map side lengths")
     args = parser.parse_args()
+
+    if not args.data.exists():
+        print(f"preparing {args.data}", file=sys.stderr)
+        args.data.parent.mkdir(parents=True, exist_ok=True)
+        result = uv_run([SPATIOMIC], HERE / "data.py", str(args.data))
+        if result.returncode:
+            sys.exit(result.stderr)
 
     cupy = os.environ.get("CUPY", "cupy-cuda12x")
     for library, device, batch_size, size in CONFIGS:
