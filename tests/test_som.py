@@ -169,6 +169,11 @@ def test_matches_reference(data, metric):
     som = SOM(10, 10, n_epochs=1, **som_kwargs).fit(data)
     np.testing.assert_allclose(som.weights_, ref, atol=1e-4)
 
+    # non-square, so rows and columns of the separable neighbourhood cannot be swapped
+    ref = reference_som(data, 4, 9, 1.25, 0.125, 1, metric)
+    som = SOM(4, 9, n_epochs=1, **som_kwargs).fit(data)
+    np.testing.assert_allclose(som.weights_, ref, atol=1e-4)
+
     # full schedule over several epochs; float32 vs float64 may flip near-tied BMUs, so compare map quality
     ref = reference_som(data, 10, 10, 1.25, 0.125, 3, metric)
     som = SOM(10, 10, n_epochs=3, **som_kwargs).fit(data)

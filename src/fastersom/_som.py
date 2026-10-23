@@ -9,8 +9,9 @@ keeping w_k if the denominator is 0. r_j are the node coordinates on the rectang
 exponentially, sigma(t) = sigma_initial * (sigma_final / sigma_initial) ** (t / n_epochs).
 
 Grouping samples by BMU gives the same update from per-node sums: with S_j the sum and n_j the count of samples whose
-BMU is j, numerator = H @ S and denominator = H @ n, H the (nodes x nodes) neighbourhood matrix. This costs
-O(nodes^2) per epoch instead of O(n_samples * nodes).
+BMU is j, numerator = H @ S and denominator = H @ n, H the (nodes x nodes) neighbourhood matrix. The gaussian on the
+grid is separable, H = H_rows (x) H_cols, so both products take one matrix product along the rows and one along the
+columns, O(nodes * (n_rows + n_cols)) per epoch instead of O(n_samples * nodes), without ever building H.
 
 References:
     T. Kohonen, Self-Organizing Maps, 3rd ed., Springer, 2001.
@@ -301,6 +302,16 @@ class SOM:
                 distance[~has_bmu] = torch.nan
         return bmu, distance
 
+    def _smooth(self, values: torch.Tensor, sigma: float) -> torch.Tensor:
+        """H @ values for the gaussian neighbourhood H of width sigma, as H_rows and H_cols along the grid axes."""
+
+        def gaussian(n: int) -> torch.Tensor:
+            r = torch.arange(n, dtype=torch.float32, device=self._device)
+            return (r[:, None] - r).square_().mul_(-0.5 / sigma**2).exp_()
+
+        grid = (gaussian(self.n_rows) @ values.view(self.n_rows, -1)).view(self.n_rows, self.n_cols, -1)
+        return (gaussian(self.n_cols) @ grid).view(len(values), -1)
+
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
         """Fits the map, starting from the initialisation given by init.
 
@@ -328,12 +339,10 @@ class SOM:
                 if keep is not None:
                     batch, bmus = batch[keep], bmus[keep]
                 sums.index_add_(0, bmus, batch)
-                counts += torch.bincount(bmus, minlength=n_nodes)
-            # in place, so large maps hold one nodes x nodes matrix at a time
-            h = torch.cdist(self._coords, self._coords).square_().mul_(-0.5 / sigma**2).exp_()
-            numerator, denominator = h @ sums, h @ counts
-            del h  # before the next epoch's BMU search and neighbourhood matrix
-            weights = torch.where(denominator[:, None] > 0, numerator / denominator[:, None], weights)
+                counts.index_add_(0, bmus, torch.ones_like(bmus, dtype=counts.dtype))  # bincount syncs on CUDA
+            smoothed = self._smooth(torch.cat([sums, counts[:, None]], 1), sigma)
+            numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
+            weights = torch.where(denominator > 0, numerator / denominator, weights)
         self._set_weights(weights)
         self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
         return self
