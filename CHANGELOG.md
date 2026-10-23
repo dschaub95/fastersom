@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `fit` applies the gaussian neighbourhood along the grid rows and columns separately instead of building the
+  nodes x nodes neighbourhood matrix, which took 400 MB for a 100 x 100 map and 6.4 GB for a 200 x 200 map. The update
+  is the same up to float32 rounding and costs O(nodes * (n_rows + n_cols)) instead of O(nodes^2).
+- `fit` counts the samples per node without `torch.bincount`, which waited for the GPU once per batch on CUDA.
+
 ## 0.3.0 (2026-10-22)
 
 - On CUDA and MPS (torch >= 2.5), `batch_size` defaults to 2^28 / n_nodes (where speed levels off), reduced to fit
