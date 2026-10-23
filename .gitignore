@@ -12,3 +12,6 @@ htmlcov/
 
 # uv / virtual environments
 .venv/
+
+# Benchmark data
+benchmarks/data/
