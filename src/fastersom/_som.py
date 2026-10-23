@@ -332,15 +332,15 @@ class SOM:
         n_nodes, batch_size = weights.shape[0], self._batch_size_for(data)
         for t in range(self.n_epochs):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
-            sums, counts = torch.zeros_like(weights), weights.new_zeros(n_nodes)
+            sums, counts = torch.zeros_like(weights), torch.zeros(n_nodes, dtype=torch.long, device=weights.device)
             for batch in data.split(batch_size):
                 bmus = self._scores(batch, weights).argmin(1)
                 keep = self._has_bmu(batch)  # samples without a BMU do not contribute
                 if keep is not None:
                     batch, bmus = batch[keep], bmus[keep]
                 sums.index_add_(0, bmus, batch)
-                counts.index_add_(0, bmus, torch.ones_like(bmus, dtype=counts.dtype))  # bincount syncs on CUDA
-            smoothed = self._smooth(torch.cat([sums, counts[:, None]], 1), sigma)
+                counts.index_add_(0, bmus, torch.ones_like(bmus))
+            smoothed = self._smooth(torch.cat([sums, counts[:, None].float()], 1), sigma)
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
             weights = torch.where(denominator > 0, numerator / denominator, weights)
         self._set_weights(weights)
