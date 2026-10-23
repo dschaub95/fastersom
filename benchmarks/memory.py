@@ -1,8 +1,9 @@
 """Fit time and peak GPU memory of fastersom, XPySom and torchsom at several map and batch sizes.
 
 Runs on the spatiomic tutorial's preprocessed subsample (480,000 x 34 pixels), which the first run downloads and
-prepares (see ``data.py``). Every configuration runs in its own process, so the memory peaks do not mix, with XPySom,
-CuPy and torchsom installed into temporary environments on top of this project's:
+prepares (see ``data.py``). Every configuration runs in its own process limited to ``--cpus`` cores (default 16), so
+the memory peaks do not mix, with XPySom, CuPy and torchsom installed into temporary environments on top of this
+project's:
 
     uv run benchmarks/memory.py                                   # every configuration
     uv run benchmarks/memory.py --library fastersom --device cpu  # a part of them
@@ -121,7 +122,7 @@ def run(library: str, device: str, batch_size: int | None, size: int, path: str)
     return {
         "library": library,
         "device": device,
-        "hardware": torch.cuda.get_device_name() if cuda else f"{os.cpu_count()}-core CPU",
+        "hardware": torch.cuda.get_device_name() if cuda else f"{torch.get_num_threads()} CPU threads",
         "nodes": f"{size}x{size}",
         "batch_size": batch_size or "default",
         "fit_s": round(float(np.mean(times[1:])), 3),
@@ -142,7 +143,16 @@ def main() -> None:
     parser.add_argument("--library", nargs="+", choices=list(PACKAGES), default=list(PACKAGES))
     parser.add_argument("--device", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
     parser.add_argument("--size", nargs="+", type=int, default=[30, 100], help="map side lengths")
+    parser.add_argument("--cpus", type=int, default=16, help="CPU cores and threads per configuration")
     args = parser.parse_args()
+
+    # the child processes inherit the CPU affinity (Linux only) and the thread counts
+    cpus = min(args.cpus, os.cpu_count())
+    if hasattr(os, "sched_setaffinity"):
+        os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[: args.cpus])
+        cpus = len(os.sched_getaffinity(0))
+    for name in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]:
+        os.environ[name] = str(cpus)
 
     if not args.data.exists():
         print(f"preparing {args.data}", file=sys.stderr)
