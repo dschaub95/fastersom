@@ -348,6 +348,19 @@ def test_cuda_matches_cpu(data, metric):
     assert cuda.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
+def test_mps_matches_cpu(data):
+    kwargs = dict(n_rows=6, n_cols=6, random_state=0)
+    cpu = SOM(n_epochs=1, device=CPU, **kwargs).fit(data)
+    mps = SOM(n_epochs=1, device="mps", **kwargs).fit(data)
+    np.testing.assert_allclose(mps.weights_, cpu.weights_, atol=1e-5)
+    np.testing.assert_array_equal(mps.predict(data), cpu.predict(data))
+    cpu = SOM(n_epochs=3, device=CPU, **kwargs).fit(data)
+    mps = SOM(n_epochs=3, device="mps", **kwargs).fit(data)
+    assert (mps.labels_ == cpu.labels_).mean() > 0.95
+    assert mps.quantization_error(data) == pytest.approx(cpu.quantization_error(data), rel=1e-2)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
     som = SOM(5, 4, n_epochs=2, random_state=0, device="cuda").fit(data)
