@@ -364,7 +364,7 @@ def test_gpu_matches_cpu(data, metric, device, deterministic):
 
 
 @pytest.mark.parametrize("device", GPUS)
-def test_deterministic(device):
+def test_deterministic(device, monkeypatch):
     # many samples per node, so that the order of atomic additions varies between runs without deterministic
     X = np.random.default_rng(0).normal(size=(200_000, 6)).astype(np.float32)
     kwargs = dict(n_rows=4, n_cols=4, n_epochs=3, random_state=0, device=device)
@@ -372,6 +372,7 @@ def test_deterministic(device):
     for _ in range(3):
         np.testing.assert_array_equal(SOM(deterministic=True, **kwargs).fit(X).weights_, weights)
 
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")  # else CUDA matmuls raise under deterministic algorithms
     previous = torch.are_deterministic_algorithms_enabled()
     torch.use_deterministic_algorithms(True)
     try:
