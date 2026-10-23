@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 (2026-10-23)
 
 - `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, by summing the samples per node
   with a matrix product instead of atomic additions, whose order varies (1.2-1.8x slower on MPS). It is also used
