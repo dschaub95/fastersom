@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-10-23)
 
 - `fit` applies the gaussian neighbourhood along the grid rows and columns separately instead of building the
   nodes x nodes neighbourhood matrix, which took 400 MB for a 100 x 100 map and 6.4 GB for a 200 x 200 map. The update
