@@ -48,10 +48,12 @@ CONFIGS = [
     ("fastersom", "cuda", None, 200),
     ("fastersom", "cuda", 8096, 200),
     ("xpysom", "cuda", 8096, 200),
-    ("fastersom", "cpu", None, 200),  # one fit without a warm-up, as it takes over an hour
+    ("fastersom", "cpu", None, 200),  # one fit without a warm-up, as it takes about 45 minutes
 ]
 # packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
 PACKAGES = {"fastersom": [], "xpysom": ["xpysom==1.0.7"], "torchsom": ["torchsom==1.3.1"]}
+# uv.lock does not cover these packages, so their dependencies resolve as of this date
+EXCLUDE_NEWER = "2026-10-23T00:00:00Z"
 
 
 def fit(library: str, device: str, batch_size: int | None, size: int, X: np.ndarray, seed: int):
@@ -117,7 +119,8 @@ def run(library: str, device: str, batch_size: int | None, size: int, path: str)
 
         pool = cupy.get_default_memory_pool()
     times = []
-    seeds = SEEDS[:1] if size == 200 and not cuda else [SEEDS[0], *SEEDS]  # the first of several runs warms up
+    # the first of several runs warms up; a single fit uses the last seed, whose map the other rows report
+    seeds = SEEDS[-1:] if size == 200 and not cuda else [SEEDS[0], *SEEDS]
     for seed in seeds:
         if pool:
             pool.free_all_blocks()
@@ -150,7 +153,8 @@ def run(library: str, device: str, batch_size: int | None, size: int, path: str)
 
 def uv_run(packages: list[str], script: Path, *args: str) -> subprocess.CompletedProcess:
     """Runs the script in a temporary environment of this project's plus the given packages."""
-    command = [os.environ.get("UV", "uv"), "run", "--project", str(HERE.parent), *(f"--with={p}" for p in packages)]
+    command = [os.environ.get("UV", "uv"), "run", "--frozen", f"--exclude-newer={EXCLUDE_NEWER}"]
+    command += ["--project", str(HERE.parent), *(f"--with={p}" for p in packages)]
     return subprocess.run([*command, "python", str(script), *args], capture_output=True, text=True)
 
 

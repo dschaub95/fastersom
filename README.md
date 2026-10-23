@@ -82,7 +82,7 @@ environments and prints one JSON line per row; `--library`, `--device` and `--si
 | fastersom                                            | 200 x 200 | NVIDIA A100    | default (6,710)   | 29.4 s   | 3294 MiB        | 0.380              |
 | fastersom                                            | 200 x 200 | NVIDIA A100    | 8,096             | 28.7 s   | 3718 MiB        | 0.380              |
 | XPySom (CuPy)                                        | 200 x 200 | NVIDIA A100    | 8,096             | 118.8 s  | 12292 MiB       | 0.380              |
-| fastersom                                            | 200 x 200 | 16 CPU threads | default (8,192)   | 43 min   | -               | 0.368              |
+| fastersom                                            | 200 x 200 | 16 CPU threads | default (8,192)   | 43 min   | -               | 0.380              |
 
 At equal or less GPU memory fastersom is about 4x faster than XPySom on a 30 x 30 map, 5x faster on a 100 x 100 map
 (with a seventh of the memory) and 4x faster on a 200 x 200 map (with under a third of the memory), and 14x faster on
