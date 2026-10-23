@@ -48,6 +48,7 @@ Options:
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats) without changing the algorithm. On CUDA and MPS
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5
   on MPS) of the free GPU memory, so it rarely needs tuning.
+- `verbose=True` shows a progress bar over the epochs of `fit`, with an estimate of the remaining time.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.

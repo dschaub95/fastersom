@@ -24,6 +24,7 @@ from typing import Literal, overload
 import numpy as np
 import torch
 from numpy.typing import ArrayLike
+from tqdm import tqdm
 
 _METRICS = ("euclidean", "manhattan", "cosine", "correlation")
 _INITS = ("random", "sample")
@@ -47,6 +48,13 @@ def _is_available(device: torch.device) -> bool:
     if device.type == "mps":
         return torch.backends.mps.is_available()
     return device.type == "cpu"
+
+
+def _synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 class SOM:
@@ -83,6 +91,8 @@ class SOM:
             memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
         memory_fraction: Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
             on CUDA and 0.5 on MPS, whose memory the system and other apps share.
+        verbose: Whether fit shows a progress bar over the epochs, with an estimate of the remaining time. On GPUs, it
+            then waits for each epoch to finish before starting the next.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -103,6 +113,7 @@ class SOM:
         device: str | torch.device | None = None,
         batch_size: int | None = None,
         memory_fraction: float | None = None,
+        verbose: bool = False,
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -115,6 +126,7 @@ class SOM:
         self.device = device
         self.batch_size = batch_size
         self.memory_fraction = memory_fraction
+        self.verbose = verbose
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -135,6 +147,7 @@ class SOM:
     def __setstate__(self, state: dict) -> None:
         """Restores a pickled map on the configured device if available (cpu, cuda, mps), else the default one."""
         state.setdefault("memory_fraction", None)  # pickled before 0.3
+        state.setdefault("verbose", False)  # pickled before 0.3.2
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -340,7 +353,7 @@ class SOM:
         data = self._check_X(X)
         weights = self._init_weights(data)
         n_nodes, batch_size = weights.shape[0], self._batch_size_for(data)
-        for t in range(self.n_epochs):
+        for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
             sums, counts = torch.zeros_like(weights), torch.zeros(n_nodes, dtype=torch.long, device=weights.device)
             for batch in data.split(batch_size):
@@ -353,6 +366,8 @@ class SOM:
             smoothed = self._smooth(torch.cat([sums, counts[:, None].float()], 1), sigma)
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
             weights = torch.where(denominator > 0, numerator / denominator, weights)
+            if self.verbose:  # the epoch's work is only queued on GPUs, so the bar would run ahead without waiting
+                _synchronize(self._device)
         self._set_weights(weights)
         self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
         return self

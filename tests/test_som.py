@@ -308,6 +308,14 @@ def test_distance_map():
     assert SOM.from_weights(np.ones((6, 2)), 2, 3, device=CPU).distance_map().max() == 0
 
 
+def test_verbose_progress_bar(data, capsys):
+    quiet = SOM(5, 4, n_epochs=3, random_state=0, device=CPU).fit(data)
+    assert capsys.readouterr().err == ""
+    verbose = SOM(5, 4, n_epochs=3, random_state=0, device=CPU, verbose=True).fit(data)
+    assert "3/3" in capsys.readouterr().err
+    np.testing.assert_array_equal(verbose.weights_, quiet.weights_)
+
+
 def test_pickle_round_trip(data, monkeypatch):
     som = SOM(5, 4, n_epochs=2, random_state=0, device=CPU).fit(data)
     labels, distances = som.predict(data, return_distance=True)
@@ -317,7 +325,7 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[0], labels)
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[1], distances)
     state = som.__getstate__()
-    del state["memory_fraction"]  # as pickled by 0.2
+    del state["memory_fraction"], state["verbose"]  # as pickled by 0.2
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
     np.testing.assert_array_equal(loaded.predict(data), labels)
