@@ -5,10 +5,11 @@ The tutorials are Jupyter notebooks; the buttons at the top of each page downloa
 {cite:p}`Wolf_2018` from the [scverse](https://scverse.org) ecosystem {cite:p}`Virshup_2023`:
 
 ```bash
-pip install fastersom scanpy igraph matplotlib
+pip install fastersom scanpy igraph matplotlib readfcs
 ```
 
-They fit on the CPU, so that the stored outputs are the same on every machine; remove `device="cpu"` to use a GPU.
+They fit on the CPU, so that rerunning them on the same machine and software versions reproduces the stored outputs;
+set `DEVICE = None` to use a GPU.
 
 ```{toctree}
 :maxdepth: 1

@@ -55,8 +55,9 @@ The first use of a feature count compiles its kernel, in 2-4 s; Triton caches it
 Compiling needs a C compiler and the Python headers (for example the `python3-dev` package, or a Python installed by
 uv). Each kernel is then checked on a tiny search with exactly known results. If compiling or the check fails,
 fastersom warns with a {class}`RuntimeWarning` and falls back one step: from the tensor-core kernel to the float32
-kernel, and from that to the torch path. ROCm and GPUs below compute capability 7.0, which Triton does not support,
-always use the torch path.
+kernel (up to 128 features, else directly to the torch path), and from that to the torch path. ROCm, whose 64-thread
+warps the kernels' tiling does not cover, and GPUs below compute capability 7.0, which Triton does not support, always
+use the torch path.
 
 ### Apple GPUs (MPS)
 

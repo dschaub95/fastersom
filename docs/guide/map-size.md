@@ -64,8 +64,9 @@ An array as `init` starts from given weights, for example a map fitted on a subs
 
 ```python
 coarse = SOM(30, 30, random_state=0).fit(X[::10])
-som = SOM(30, 30, init=coarse.weights_, sigma_initial=1.0).fit(X)
+# continue at the coarse map's final width (by default a tenth of 7.5 for 30 x 30 nodes)
+som = SOM(30, 30, init=coarse.weights_, sigma_initial=0.75, sigma_final=0.75).fit(X)
 ```
 
 The width schedule restarts at `sigma_initial`. With the default this largely retrains the map; to continue training
-instead, pass a small `sigma_initial`, such as the previous map's `sigma_final`.
+instead, pass the previous map's final width as both `sigma_initial` and `sigma_final`, as above.

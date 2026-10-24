@@ -13,7 +13,7 @@ On the CPU, `fit` gives the same map in every run with the same data and paramet
 
 On CUDA and MPS, `fit` sums the samples per node with atomic additions, whose order varies from run to run. The sums
 then differ in their last bits, and over several epochs this can flip the BMUs of near-tied samples, so that two runs
-give equally good but not identical maps. `deterministic=True` makes them identical:
+give equally good but not identical maps. `deterministic=True` makes them identical, for a fixed batch size:
 
 ```python
 som = SOM(30, 30, random_state=0, deterministic=True)
@@ -27,7 +27,8 @@ som = SOM(30, 30, random_state=0, deterministic=True)
 
 `deterministic=True` is also used when {func}`torch.use_deterministic_algorithms` is enabled.
 
-Determinism holds for the same device, software versions and batch size. Maps fitted on different devices, or with
+Determinism holds for the same device, software versions and batch size. On GPUs the default batch size depends on
+the free memory at the time of the fit, so pass an explicit `batch_size` for identical maps across runs. Maps fitted on different devices, or with
 different batch sizes, still differ by float rounding, which can flip near-tied BMUs: they agree in quality (similar
 quantization and topographic errors) rather than bit for bit.
 
