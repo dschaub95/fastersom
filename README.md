@@ -72,28 +72,35 @@ so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for
 
 ## Benchmark
 
-480,000 x 34 pixels, 10 epochs, mean of 3 seeds; peak GPU memory includes the data
+The spatiomic tutorial's 480,000 x 34 pixels, and 5,000,000 x 60 synthetic samples for the 200 x 200 map; 10 epochs,
+mean of 3 seeds (one fit on the CPU at 200 x 200); 16 CPU threads; peak GPU memory includes the data.
+`uv run benchmarks/memory.py` downloads and preprocesses the tutorial data, installs XPySom and torchsom into temporary
+environments and prints one JSON line per row; `--library`, `--device` and `--size` run a part of it
 ([`benchmarks/memory.py`](https://github.com/dschaub95/fastersom/blob/main/benchmarks/memory.py)).
 
-| implementation                                       | map       | hardware     | batch size        | fit time | peak GPU memory | quantization error |
-| ---------------------------------------------------- | --------- | ------------ | ----------------- | -------- | --------------- | ------------------ |
-| fastersom                                            | 30 x 30   | NVIDIA A100  | default (480,000) | 0.048 s  | 234 MiB         | 0.168              |
-| fastersom                                            | 30 x 30   | NVIDIA A100  | 32,768            | 0.054 s  | 90 MiB          | 0.168              |
-| fastersom                                            | 30 x 30   | NVIDIA A100  | 8,096             | 0.13 s   | 90 MiB          | 0.168              |
-| [XPySom](https://github.com/Manciukic/xpysom) (CuPy) | 30 x 30   | NVIDIA A100  | 8,096             | 0.47 s   | 313 MiB         | 0.169              |
-| XPySom (CuPy)                                        | 30 x 30   | NVIDIA A100  | 65,536            | 0.41 s   | 2088 MiB        | 0.169              |
-| [torchsom](https://github.com/michelin/TorchSOM)     | 30 x 30   | NVIDIA A100  | 1,024             | 22.3 s   | 44 MiB          | 0.175              |
-| fastersom                                            | 30 x 30   | 256-core CPU | default (8,192)   | 1.8 s    | -               | 0.169              |
-| XPySom (NumPy)                                       | 30 x 30   | 256-core CPU | 8,096             | 42.3 s   | -               | 0.168              |
-| torchsom                                             | 30 x 30   | 256-core CPU | 1,024             | 39.2 s   | -               | 0.176              |
-| fastersom                                            | 100 x 100 | NVIDIA A100  | default (480,000) | 0.18 s   | 298 MiB         | 0.162              |
-| fastersom                                            | 100 x 100 | NVIDIA A100  | 8,096             | 0.21 s   | 110 MiB         | 0.162              |
-| XPySom (CuPy)                                        | 100 x 100 | NVIDIA A100  | 8,096             | 2.8 s    | 2846 MiB        | 0.162              |
-| fastersom                                            | 100 x 100 | 256-core CPU | default (8,192)   | 52.7 s   | -               | 0.162              |
+| implementation                                       | map       | hardware       | batch size          | fit time | peak GPU memory | quantization error |
+| ---------------------------------------------------- | --------- | -------------- | ------------------- | -------- | --------------- | ------------------ |
+| fastersom                                            | 30 x 30   | NVIDIA A100    | default (480,000)   | 0.048 s  | 234 MiB         | 0.168              |
+| fastersom                                            | 30 x 30   | NVIDIA A100    | 32,768              | 0.052 s  | 90 MiB          | 0.168              |
+| fastersom                                            | 30 x 30   | NVIDIA A100    | 8,096               | 0.13 s   | 90 MiB          | 0.168              |
+| [XPySom](https://github.com/Manciukic/xpysom) (CuPy) | 30 x 30   | NVIDIA A100    | 8,096               | 0.46 s   | 313 MiB         | 0.169              |
+| XPySom (CuPy)                                        | 30 x 30   | NVIDIA A100    | 65,536              | 0.41 s   | 2088 MiB        | 0.169              |
+| [torchsom](https://github.com/michelin/TorchSOM)     | 30 x 30   | NVIDIA A100    | 1,024               | 22.2 s   | 44 MiB          | 0.175              |
+| fastersom                                            | 30 x 30   | 16 CPU threads | default (8,192)     | 1.8 s    | -               | 0.169              |
+| XPySom (NumPy)                                       | 30 x 30   | 16 CPU threads | 8,096               | 25.6 s   | -               | 0.168              |
+| torchsom                                             | 30 x 30   | 16 CPU threads | 1,024               | 36.2 s   | -               | 0.176              |
+| fastersom                                            | 100 x 100 | NVIDIA A100    | default (480,000)   | 0.18 s   | 298 MiB         | 0.162              |
+| fastersom                                            | 100 x 100 | NVIDIA A100    | 8,096               | 0.21 s   | 110 MiB         | 0.162              |
+| XPySom (CuPy)                                        | 100 x 100 | NVIDIA A100    | 8,096               | 2.8 s    | 2846 MiB        | 0.162              |
+| fastersom                                            | 100 x 100 | 16 CPU threads | default (8,192)     | 62.4 s   | -               | 0.162              |
+| fastersom                                            | 200 x 200 | NVIDIA A100    | default (1,118,481) | 11.8 s   | 2244 MiB        | 0.380              |
+| fastersom                                            | 200 x 200 | NVIDIA A100    | 8,096               | 12.4 s   | 1346 MiB        | 0.380              |
+| XPySom (CuPy)                                        | 200 x 200 | NVIDIA A100    | 8,096               | 118.8 s  | 12292 MiB       | 0.380              |
+| fastersom                                            | 200 x 200 | 16 CPU threads | default (8,192)     | 43 min   | -               | 0.380              |
 
-With less GPU memory fastersom is about 10x faster than XPySom on a 30 x 30 map and 13x faster on a 100 x 100 map
-(at batch size 8,096, with a twenty-fifth of the memory), and over 20x faster on the CPU. torchsom updates the map per
-mini-batch, so it needs small batches and is far slower.
+With less GPU memory fastersom is about 10x faster than XPySom on a 30 x 30 map, 16x faster on a 100 x 100 map
+(with a tenth of the memory) and 10x faster on a 200 x 200 map (with a ninth of the memory), and 14x faster on the CPU.
+torchsom updates the map per mini-batch, so it needs small batches and is far slower.
 
 [`benchmarks/fused.py`](https://github.com/dschaub95/fastersom/blob/main/benchmarks/fused.py) compares fit time and
 peak memory on CUDA over map sizes, feature counts, metrics and `deterministic` between versions.
