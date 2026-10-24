@@ -57,6 +57,7 @@ _HALF_MIN_FEATURES = 16
 _METAL = ("metal", "metal-float16")
 # how a failure's warning names the kernel, and what the kernel leaves
 _WARNINGS = {
+    "tf32": ("TF32", "the 3xTF32 kernel, the float32 kernel or the torch path"),
     "tensor-core": ("tensor-core", "the float32 kernel or the torch path"),
     "metal": ("Metal", "the torch path"),
     "metal-float16": ("Metal float16", "the float32 Metal kernel or the torch path"),
@@ -134,7 +135,8 @@ def _works(device: torch.device, kernel: str, n_features: int, metric: str, top2
         if kernel in _METAL:
             _metal(device).check(device, n_features, manhattan, bias, top2, kernel == "metal-float16")
         else:
-            _triton(device).check(device, n_features, kernel == "tensor-core", manhattan, bias, top2)
+            tensor_cores = kernel in ("tensor-core", "tf32")
+            _triton(device).check(device, n_features, tensor_cores, manhattan, bias, top2, one=kernel == "tf32")
     except Exception as error:
         if _out_of_memory(error):
             raise
@@ -249,16 +251,17 @@ class SOM:
         fused: Whether the BMU search on CUDA and MPS may use the fused kernels. With False, it never compiles or
             launches them and takes the torch path, as on the CPU.
         precision: ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11
-            significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
-            scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30).
-            Only under euclidean, cosine and correlation from 16 features with the Metal kernels, else float32 (as on
-            CUDA); labels_, predict, transform and the error measures stay float32. The BMUs of near-tied samples
-            flip, more of them on larger maps and depending on the data (on clustered 0-1 pixels of 34 features about
-            1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
-            node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
-            same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
-            is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs may gain more,
-            which is untested.
+            significant bits for speed, summing the products in float32: on MPS as half inputs to the Metal kernels,
+            scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30); on
+            CUDA as one TF32 product instead of three, on the GPUs of the tensor-core kernel. Only under euclidean,
+            cosine and correlation from 16 features with the fused kernels, else float32; labels_, predict, transform
+            and the error measures stay float32. The BMUs of near-tied samples flip, more of them on larger maps and
+            depending on the data (on clustered 0-1 pixels of 34 features about 1% at 10 x 10 nodes and 10-35% from
+            30 x 30), each within the rounding error (the squared distance to the node found 0.6% above the best on
+            average), which gives an equally good map rather than the same one: the same quantization error, and a
+            topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit is only 1.00-1.05x faster, as
+            its half products are no faster than float32 ones; M5 GPUs and CUDA tensor cores may gain more, which is
+            untested.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -377,8 +380,8 @@ class SOM:
 
     def _kernel(self, n_features: int, top2: bool = False, half: bool = False) -> str | None:
         """The fused kernel of the BMU search, on CUDA "tensor-core" or "float32", on MPS "metal", or None for the
-        torch path; with half (fit under precision="float16") first "metal-float16" for dot-product scores from
-        _HALF_MIN_FEATURES features. The tensor-core kernel searches dot-product scores on the GPUs of _FAST_TF32,
+        torch path; with half (fit under precision="float16") first "tf32" or "metal-float16" for dot-product scores
+        from _HALF_MIN_FEATURES features. The tensor-core kernels search dot-product scores on the GPUs of _FAST_TF32,
         for over 64 nodes (a tile of 128 is half empty otherwise) and n_nodes x n_features >= 8192 (below, the float32
         kernel is as fast or faster on an A100); a kernel that fails its self-check leaves the next one."""
         if not self.fused:
@@ -392,7 +395,7 @@ class SOM:
         elif _triton(self._device) is not None:
             if not manhattan and n_nodes > 64 and n_nodes * n_features >= 8192:
                 fast_tf32 = torch.cuda.get_device_capability(self._device) in _FAST_TF32
-                kernels += ["tensor-core"] if fast_tf32 else []
+                kernels += (["tf32"] if half else []) + ["tensor-core"] if fast_tf32 else []
             kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
         return next((k for k in kernels if _works(self._device, k, n_features, self.metric, top2)), None)
 
@@ -415,7 +418,7 @@ class SOM:
             # multiple of 8 or 16, which for few features takes several times their memory; on MPS 4 copies and the
             # one that Metal's bmu_staged pads with the bias column to a multiple of 16 features. Speed levels off long
             # before 2^26 values
-            if kernel == "tensor-core":
+            if kernel in ("tensor-core", "tf32"):
                 per_sample = 16 * (-(-n_features // 16) * 16) + 32
             elif kernel in _METAL:
                 per_sample = 4 * (4 * n_features + _metal(self._device).sample_width(n_features)) + 32
@@ -537,7 +540,10 @@ class SOM:
         elif kernel == "metal":
             search = _metal(self._device).search(nodes, bias, centre, manhattan, top2)
         else:
-            search = _triton(self._device).search(nodes, bias, centre, manhattan, kernel == "tensor-core", top2)
+            tensor_cores = kernel in ("tensor-core", "tf32")
+            search = _triton(self._device).search(
+                nodes, bias, centre, manhattan, tensor_cores, top2, one=kernel == "tf32"
+            )
         return lambda batch: search(self._centre(batch))
 
     def _score_distances(self, batch: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
