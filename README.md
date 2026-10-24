@@ -52,16 +52,23 @@ Options:
   `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small
   `sigma_initial`, e.g. the previous map's `sigma_final`.
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce XPySom's.
-- `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the fused CUDA
-  kernels below) without changing the algorithm. On CUDA and MPS it defaults to the largest batch that still helps
-  speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on MPS) of the free GPU memory, so it rarely needs
-  tuning.
+- `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the
+  [fused CUDA kernels](#fused-cuda-kernels)) without changing the algorithm. On CUDA and MPS it defaults to the largest
+  batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on MPS) of the free GPU memory,
+  so it rarely needs tuning.
 - `verbose=True` shows a progress bar over the epochs of `fit`, with an estimate of the remaining time.
 - `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, whose atomic additions otherwise
   vary in order. On CUDA it sums the samples per node as 64-bit fixed-point integers (on an A100 up to 2x slower on
   small maps, 3-10% from 100 x 100 nodes), on MPS with a matrix product (1.2-1.8x slower). It is also used under
   `torch.use_deterministic_algorithms(True)`. The CPU is always deterministic; maps from different devices still differ
   by float rounding.
+- `fused=False` turns off the [fused CUDA kernels](#fused-cuda-kernels) of the BMU search and takes the torch path
+  instead, without compiling anything. It only matters on CUDA.
+
+Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
+so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.
+
+### Fused CUDA kernels
 
 On CUDA with Triton >= 3.5 (in torch's Linux wheels from torch 2.9), the BMU search runs in fused kernels that never
 store the batch x nodes distances: on tensor cores under euclidean, cosine and correlation on A100, H100 and B200 GPUs
@@ -74,9 +81,6 @@ cached on disk by Triton), which needs a C compiler and the Python headers (e.g.
 Python), and checks it on a tiny search. If either fails, fastersom warns and falls back from the tensor-core kernel
 to the float32 kernel and from that to the torch path, which ROCm, GPUs below compute capability 7.0 (which Triton
 does not support), MPS and the CPU always use. `fused=False` takes the torch path on CUDA too, without compiling.
-
-Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
-so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.
 
 ## Benchmark
 
