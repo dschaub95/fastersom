@@ -1,5 +1,12 @@
 # fastersom
 
+[![PyPI](https://img.shields.io/pypi/v/fastersom)](https://pypi.org/project/fastersom/)
+[![Downloads](https://static.pepy.tech/badge/fastersom)](https://pepy.tech/projects/fastersom)
+[![Python](https://img.shields.io/pypi/pyversions/fastersom)](https://pypi.org/project/fastersom/)
+[![CI](https://github.com/dschaub95/fastersom/actions/workflows/ci.yml/badge.svg)](https://github.com/dschaub95/fastersom/actions/workflows/ci.yml)
+[![License](https://img.shields.io/pypi/l/fastersom)](https://github.com/dschaub95/fastersom/blob/main/LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 A small, fast batch self-organising map (SOM) in PyTorch: a reimplementation of Kohonen's batch map with a
 rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhood width. Its defaults reproduce the
 batch-trained maps of [XPySom](https://github.com/Manciukic/xpysom) with a gaussian neighbourhood of initial width
