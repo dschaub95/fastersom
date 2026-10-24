@@ -256,7 +256,7 @@ class SOM:
             significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
             scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30).
             Only under euclidean, cosine and correlation from 16 features with the Metal kernels, else float32 (as on
-            CUDA); labels_, predict, transform and the error measures stay float32. The BMUs of near-tied samples
+            CUDA); ``labels_``, predict, transform and the error measures stay float32. The BMUs of near-tied samples
             flip, more of them on larger maps and depending on the data (on clustered 0-1 pixels of 34 features about
             1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
             node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
@@ -706,7 +706,7 @@ class SOM:
         return (bmus.cpu().numpy(), distances.cpu().numpy()) if return_distance else bmus.cpu().numpy()
 
     def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
-        """Fits the map and returns labels_."""
+        """Fits the map and returns ``labels_``."""
         return self.fit(X).labels_
 
     def _distances(self, batch: torch.Tensor) -> torch.Tensor:
