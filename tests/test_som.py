@@ -413,62 +413,174 @@ def fused():
     return _som
 
 
-@pytest.mark.parametrize("metric", METRICS)
-@pytest.mark.parametrize(
-    ("n_samples", "n_features", "n_rows", "n_cols"),
-    [(5000, 6, 7, 9), (3001, 34, 30, 30), (1500, 196, 9, 9), (500, 160, 3, 3)],
-)
-def test_fused_matches_torch(fused, metric, n_samples, n_features, n_rows, n_cols):
-    # sizes off the tiles. Float32 kernel: 6 features without its loop over 16, 34 and 196 with a remainder, 160 without
-    # (manhattan only, as 9 nodes stay off tensor cores); tensor cores (on GPUs with fast TF32): 34 and 196 features
+@pytest.mark.parametrize("p", [1, 2])
+def test_cdist_matches_torch(p):
+    # on MPS one feature at a time, as torch's cdist there holds samples x nodes x features floats
+    from fastersom._som import _cdist
+
+    rng = np.random.default_rng(0)
+    x, y = (torch.as_tensor(rng.normal(size=(n, 7)).astype(np.float32)) for n in (50, 30))
+    ref = torch.cdist(x.double(), y.double(), p=p).float()
+    for device in ["cpu", *(["mps"] if torch.backends.mps.is_available() else [])]:
+        torch.testing.assert_close(_cdist(x.to(device), y.to(device), p).cpu(), ref)
+
+
+@pytest.fixture(scope="module")
+def metal_som():
+    """Skips unless torch compiles Metal kernels here (MPS, torch >= 2.6); returns fastersom._som."""
+    from fastersom import _som
+
+    if not torch.backends.mps.is_available() or _som._metal(torch.device("mps")) is None:
+        pytest.skip("no MPS or no torch.mps.compile_shader")
+    return _som
+
+
+SEARCH_SIZES = [(5000, 6, 7, 9), (3001, 34, 30, 30), (1500, 196, 9, 9), (500, 160, 3, 3)]
+
+
+def assert_fused_matches_torch(som, X, device, agreement=0.999):
+    """The fused kernel's BMUs, distances and best two nodes against som's torch path."""
+    n_features = X.shape[1]
+    labels, distances = som.predict(X, return_distance=True)
+    top2 = som._search(som._weights, som._kernel(n_features, top2=True), top2=True)(torch.as_tensor(X, device=device))
+    som.fused = False
+    ref_labels, ref_distances = som.predict(X, return_distance=True)
+    # float32 sums in another order may flip near-ties only. So the torch path's scores of the BMUs found are its
+    # best, up to rounding, which on tensor cores is about that of float32 relative to the largest score
+    ref_scores = som._scores(torch.as_tensor(X, device=device), som._weights)
+    atol = 1e-5 * max(1, ref_scores.abs().max().item() / 10)
+    assert (labels == ref_labels).mean() > agreement
+    found = ref_scores.gather(1, torch.as_tensor(labels, device=device)[:, None])[:, 0]
+    torch.testing.assert_close(found, ref_scores.amin(1), rtol=1e-5, atol=atol)
+    np.testing.assert_allclose(distances, ref_distances, rtol=1e-5, atol=1e-5)
+    # the two best nodes in order, by the torch path's scores, as their order is arbitrary on exact ties
+    assert (top2[:, 0] != top2[:, 1]).all()
+    ref_top2 = ref_scores.topk(2, 1, largest=False).values
+    torch.testing.assert_close(ref_scores.gather(1, top2), ref_top2, rtol=1e-5, atol=atol)
+
+
+def search_case(metric, n_samples, n_features, n_rows, n_cols, device):
+    """Samples with an offset and a map of samples plus noise, for assert_fused_matches_torch."""
     rng = np.random.default_rng(0)
     X = (rng.normal(size=(n_samples, n_features)) + rng.normal(size=n_features) * 3).astype(np.float32)
     weights = X[rng.choice(n_samples, n_rows * n_cols)] + rng.normal(scale=0.1, size=(n_rows * n_cols, n_features))
-    som = SOM.from_weights(weights.astype(np.float32), n_rows, n_cols, metric=metric, device="cuda")
+    return X, SOM.from_weights(weights.astype(np.float32), n_rows, n_cols, metric=metric, device=device)
+
+
+@pytest.mark.parametrize("metric", METRICS)
+@pytest.mark.parametrize(("n_samples", "n_features", "n_rows", "n_cols"), SEARCH_SIZES)
+def test_fused_matches_torch(fused, metric, n_samples, n_features, n_rows, n_cols):
+    # sizes off the tiles. Float32 kernel: 6 features without its loop over 16, 34 and 196 with a remainder, 160 without
+    # (manhattan only, as 9 nodes stay off tensor cores); tensor cores (on GPUs with fast TF32): 34 and 196 features
+    X, som = search_case(metric, n_samples, n_features, n_rows, n_cols, "cuda")
     n_nodes = n_rows * n_cols
     if metric != "manhattan" and n_nodes > 64 and n_nodes * n_features >= 8192:
         fast_tf32 = torch.cuda.get_device_capability() in fused._FAST_TF32
         assert som._kernel(n_features) == ("tensor-core" if fast_tf32 else "float32" if n_features <= 128 else None)
     else:
         assert som._kernel(n_features) == ("float32" if metric == "manhattan" or n_features <= 128 else None)
-    labels, distances = som.predict(X, return_distance=True)
-    top2 = som._search(som._weights, som._kernel(n_features, top2=True), top2=True)(torch.as_tensor(X, device="cuda"))
-    som.fused = False
-    ref_labels, ref_distances = som.predict(X, return_distance=True)
-    # float32 sums in another order may flip near-ties only
-    assert (labels == ref_labels).mean() > 0.999
-    np.testing.assert_allclose(distances, ref_distances, rtol=1e-5, atol=1e-5)
-    # the two best nodes in order, by the torch path's scores, as their order is arbitrary on exact ties; up to
-    # rounding, which on tensor cores is about that of float32 relative to the largest score
-    ref_scores = som._scores(torch.as_tensor(X, device="cuda"), som._weights)
-    assert (top2[:, 0] != top2[:, 1]).all()
-    ref_top2 = ref_scores.topk(2, 1, largest=False).values
-    atol = 1e-5 * max(1, ref_scores.abs().max().item() / 10)
-    torch.testing.assert_close(ref_scores.gather(1, top2), ref_top2, rtol=1e-5, atol=atol)
+    assert_fused_matches_torch(som, X, "cuda")
 
 
-def test_fused_ties_and_offsets(fused):
+@pytest.mark.parametrize("metric", METRICS)
+@pytest.mark.parametrize(("n_samples", "n_features", "n_rows", "n_cols"), [*SEARCH_SIZES, (700, 64, 5, 5)])
+def test_metal_matches_torch(metal_som, metric, n_samples, n_features, n_rows, n_cols):
+    # bmu_dot at 6, 34 and 64 features (64 adds the bias after the products, as it has no padding to ride in),
+    # bmu_staged at 160 (a multiple of its chunks of 16, so that the bias takes a chunk of its own) and 196; bmu_l1 with
+    # 8, 3 and 2 samples per thread. Agreement 0.99, as at 160 features one of the 500 samples is a near-tie
+    X, som = search_case(metric, n_samples, n_features, n_rows, n_cols, "mps")
+    assert som._kernel(n_features) == "metal"
+    assert metal_som._metal(torch.device("mps"))._use_staged(n_rows * n_cols, n_features) == (n_features > 64)
+    assert_fused_matches_torch(som, X, "mps", agreement=0.99)
+
+
+def assert_ties_and_offsets(device):
     # duplicate nodes tie exactly: the first wins, as with torch's argmin
     weights = np.array([[3, 1, 2], [1, 2, 3], [3, 1, 2], [1, 2, 3], [2, 3, 1]], np.float32)
     for metric in METRICS:
-        som = SOM.from_weights(weights, 1, 5, metric=metric, device="cuda")
+        som = SOM.from_weights(weights, 1, 5, metric=metric, device=device)
         np.testing.assert_array_equal(som.predict(weights[[1, 0, 4, 3, 2]]), [1, 0, 4, 1, 0])
     # also when the copies fall in different parts of the nodes, which few samples split across programs
     weights = np.random.default_rng(0).normal(size=(20, 30, 6)).astype(np.float32)
     weights[19, 29] = weights[12, 5] = weights[0, 10]
-    som = SOM.from_weights(weights, 20, 30, device="cuda")
-    np.testing.assert_array_equal(som.predict(np.repeat(weights[:1, 10], 3, 0)), [10, 10, 10])
+    for metric in ("euclidean", "manhattan"):
+        som = SOM.from_weights(weights, 20, 30, metric=metric, device=device)
+        np.testing.assert_array_equal(som.predict(np.repeat(weights[:1, 10], 3, 0)), [10, 10, 10])
     # as test_euclidean_with_large_offset and test_correlation_with_large_offset (the 10 x 10 map: on tensor cores
     # where they are fast)
     X = (1e4 + np.random.default_rng(0).normal(scale=0.01, size=(100, 100))).astype(np.float32)
-    np.testing.assert_array_equal(SOM.from_weights(X, 10, 10, device="cuda").predict(X), np.arange(100))
+    np.testing.assert_array_equal(SOM.from_weights(X, 10, 10, device=device).predict(X), np.arange(100))
     som = SOM.from_weights(
-        np.array([[1e7, 1e7, 1e7 + 1], [0.1, 0, 1]], np.float32), 1, 2, metric="correlation", device="cuda"
+        np.array([[1e7, 1e7, 1e7 + 1], [0.1, 0, 1]], np.float32), 1, 2, metric="correlation", device=device
     )
     labels, distances = som.predict(np.array([[0, 0, 1]], np.float32), return_distance=True)
     assert labels[0] == 0
     assert distances[0] == pytest.approx(0, abs=1e-6)
     assert np.isnan(som.topographic_error(np.ones((10, 3), np.float32)))  # no sample has a BMU, so none is searched
+
+
+def test_fused_ties_and_offsets(fused):
+    assert_ties_and_offsets("cuda")
+
+
+def test_metal_ties_and_offsets(metal_som):
+    assert_ties_and_offsets("mps")
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")
+def test_metal_deterministic_bounds_one_hot(data):
+    # deterministic sums on MPS take a one-hot nodes x batch matrix, which must fit in memory_fraction (0.5) of the
+    # memory torch recommends, also with the fused kernels' larger batches (2^26 / 6 samples would take 447 GB)
+    som = SOM(100, 100, device="mps")
+    som._setup()
+    batch = som._batch_size_for(torch.as_tensor(data), "metal", one_hot=True)
+    assert batch * 10_000 * 4 <= 0.5 * torch.mps.recommended_max_memory()
+
+
+def test_metal_manhattan_up_to_512_features(metal_som):
+    # beyond 512 features a threadgroup's samples no longer fit in its threadgroup memory
+    for n_features, expected in ((512, "metal"), (513, None)):
+        som = SOM.from_weights(np.eye(4, n_features, dtype=np.float32), 2, 2, metric="manhattan", device="mps")
+        assert som._kernel(n_features) == expected
+
+
+@pytest.fixture
+def fresh_metal(metal_som, monkeypatch):
+    """fastersom._som with no Metal kernel checked yet, and the checks of other tests restored afterwards."""
+    monkeypatch.setattr(metal_som, "_FAILED", set())
+    metal_som._works.cache_clear()
+    yield metal_som
+    monkeypatch.undo()
+    metal_som._works.cache_clear()
+
+
+def test_metal_failure_falls_back(data, fresh_metal, monkeypatch):
+    # a kernel that fails its self-check (or does not compile) warns once, at the caller, and leaves the torch path
+    som = SOM.from_weights(data[:36], 6, 6, device="mps", fused=False)
+    expected = som.predict(data)
+    som.fused = True
+
+    def fail(*args):
+        raise RuntimeError("wrong BMUs in a self-check")
+
+    monkeypatch.setattr(fresh_metal._metal(torch.device("mps")), "check", fail)
+    with pytest.warns(
+        RuntimeWarning, match=r"Metal BMU kernel failed to compile or its self-check \(RuntimeError"
+    ) as w:
+        assert som._kernel(6) is None
+    assert w[0].filename == __file__
+    np.testing.assert_array_equal(som.predict(data), expected)  # no second warning
+
+
+def test_metal_out_of_memory_is_no_failure(fresh_metal, monkeypatch):
+    # MPS raises out of memory as a plain RuntimeError, which must not turn the kernels off for the session
+    def fail(*args):
+        raise RuntimeError("MPS backend out of memory (MPS allocated: 1.04 GiB)")
+
+    monkeypatch.setattr(fresh_metal._metal(torch.device("mps")), "check", fail)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        fresh_metal._works(torch.device("mps"), "metal", 6, "euclidean", False)
+    assert not fresh_metal._FAILED
 
 
 @pytest.fixture
@@ -483,15 +595,21 @@ def fresh(fused, monkeypatch):
     fused._works.cache_clear()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_fused_off_never_compiles(data, monkeypatch):
+@pytest.mark.parametrize(
+    ("device", "compiler"),
+    [
+        pytest.param("cuda", "_triton", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")),
+        pytest.param("mps", "_metal", marks=pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")),
+    ],
+)
+def test_fused_off_never_compiles(data, monkeypatch, device, compiler):
     from fastersom import _som
 
     def fail(device):
         raise AssertionError("compiled")
 
-    monkeypatch.setattr(_som, "_triton", fail)
-    som = SOM(6, 6, n_epochs=1, metric="manhattan", device="cuda", fused=False).fit(data)
+    monkeypatch.setattr(_som, compiler, fail)
+    som = SOM(6, 6, n_epochs=1, metric="manhattan", device=device, fused=False).fit(data)
     som.predict(data)
     som.topographic_error(data)
 

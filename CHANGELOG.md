@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- On MPS (Apple GPUs, torch >= 2.6; tested with 2.8 and 2.14), the BMU search runs in fused Metal kernels, which keep
+  only each sample's best node (or best two) in float32: on the simdgroup matrix units under euclidean, cosine and
+  correlation at any feature count (the samples in registers up to 64 features while the nodes fit in 32 MB, else both
+  operands streamed in chunks), and on the ALUs under manhattan up to 512 features. Few samples split the nodes over a
+  second grid axis. The search alone is 1.2-10x faster than the torch path from 5 to 300 features and 10 x 10 to
+  500 x 500 nodes, and 60-260x under manhattan. On an M3 Max (30-core GPU), with synthetic samples of the benchmark
+  data's shape (480,000 x 34; the tutorial data was not used), `fit` takes 0.059 s instead of 0.32 s at 30 x 30 nodes
+  and 0.52 s instead of 2.15 s at 100 x 100 under euclidean (cosine 3.9x at both), 0.10 s instead of about 34 s under
+  manhattan at 30 x 30, and 0.20 s instead of 0.47 s with `deterministic=True`; at 300 x 300 nodes with 300,000
+  samples 3.1 s instead of 23 s. The kernels compile from source at runtime with `torch.mps.compile_shader` (about
+  0.2 s per feature count) and pass a similar exact self-check, or warn and leave the torch path; `fused=False` keeps
+  the torch path.
+- On MPS, manhattan distances on the torch path (`fused=False`) and the distances of `transform` add up one feature
+  at a time instead of with `cdist`, which there holds batch x nodes x features floats several times over: the default
+  batch could ask for over 36 GB (26,843 samples at 100 x 100 nodes and 34 features) and freeze the machine. They now
+  take two batch x nodes matrices, at 1.5x the time of `cdist`. Under `deterministic=True`, the default batch on MPS
+  counts the one-hot nodes x batch matrix of the sums, which the fused kernels' larger batches would otherwise blow
+  up.
+- On MPS, `fit` counts the samples per node in int32, as torch 2.8's `index_add_` there takes no int64 source and
+  raised.
+
 ## 0.4.0 (2026-10-24)
 
 - On CUDA with Triton >= 3.5 (in torch's Linux wheels from torch 2.9), the BMU search of `fit`, `predict`,

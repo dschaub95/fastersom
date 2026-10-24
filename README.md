@@ -52,18 +52,19 @@ Options:
   `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small
   `sigma_initial`, e.g. the previous map's `sigma_final`.
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce XPySom's.
-- `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the
-  [fused CUDA kernels](#fused-cuda-kernels)) without changing the algorithm. On CUDA and MPS it defaults to the largest
-  batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on MPS) of the free GPU memory,
-  so it rarely needs tuning.
+- `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the fused
+  [CUDA](#fused-cuda-kernels) or [Metal](#fused-metal-kernels) kernels) without changing the algorithm. On CUDA and MPS
+  it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on
+  MPS) of the free GPU memory, so it rarely needs tuning.
 - `verbose=True` shows a progress bar over the epochs of `fit`, with an estimate of the remaining time.
 - `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, whose atomic additions otherwise
   vary in order. On CUDA it sums the samples per node as 64-bit fixed-point integers (on an A100 up to 2x slower on
-  small maps, 3-10% from 100 x 100 nodes), on MPS with a matrix product (1.2-1.8x slower). It is also used under
+  small maps, 3-10% from 100 x 100 nodes), on MPS with a matrix product (on an M3 Max 3.4-4.3x slower than without
+  from 30 x 30 to 100 x 100 nodes, as the fused search is so much faster). It is also used under
   `torch.use_deterministic_algorithms(True)`. The CPU is always deterministic; maps from different devices still differ
   by float rounding.
-- `fused=False` turns off the [fused CUDA kernels](#fused-cuda-kernels) of the BMU search and takes the torch path
-  instead, without compiling anything. It only matters on CUDA.
+- `fused=False` turns off the fused [CUDA](#fused-cuda-kernels) and [Metal](#fused-metal-kernels) kernels of the BMU
+  search and takes the torch path instead, without compiling anything. It only matters on CUDA and MPS.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.
@@ -80,7 +81,18 @@ as the H20, are likely slower on tensor cores. The first use of a feature count 
 cached on disk by Triton), which needs a C compiler and the Python headers (e.g. `python3-dev`, or a uv-managed
 Python), and checks it on a tiny search. If either fails, fastersom warns and falls back from the tensor-core kernel
 to the float32 kernel and from that to the torch path, which ROCm, GPUs below compute capability 7.0 (which Triton
-does not support), MPS and the CPU always use. `fused=False` takes the torch path on CUDA too, without compiling.
+does not support) and the CPU always use.
+
+### Fused Metal kernels
+
+On MPS (Apple GPUs, torch >= 2.6; tested with 2.8 and 2.14), the BMU search runs in fused Metal kernels, in float32
+like the torch path: on the simdgroup matrix units under euclidean, cosine and correlation at any feature count, and on
+the ALUs under manhattan up to 512 features. Apple GPUs before the M5 have no faster matrix precision than float32 to
+trade for it, so there is no counterpart to 3xTF32. On an M3 Max (30-core GPU), with 34 features, this makes `fit` 4-7x
+faster than torch's matrix product from 30 x 30 to 300 x 300 nodes; the search alone is 1.2-10x faster from 5 to 300
+features and 10 x 10 to 500 x 500 nodes, and the search under manhattan 60-260x. The kernels compile from source at
+runtime, in about 0.2 s per feature count with no Xcode or compiler needed, and pass a similar exact self-check, or
+warn and leave the torch path.
 
 ## Benchmark
 
