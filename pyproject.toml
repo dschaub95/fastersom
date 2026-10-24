@@ -49,7 +49,11 @@ minversion = "9.0"
 testpaths = ["tests"]
 addopts = ["-ra", "--import-mode=importlib"]
 strict = true
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # where Triton cannot compile (no C compiler or Python headers); the fused-kernel tests then skip
+    "ignore:fastersom's fused CUDA kernels failed:RuntimeWarning",
+]
 
 [tool.ruff]
 line-length = 120

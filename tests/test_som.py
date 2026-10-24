@@ -1,4 +1,5 @@
 import pickle
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -390,3 +391,174 @@ def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
     np.testing.assert_array_equal(loaded.weights_, som.weights_)
     assert (loaded.predict(data) == som.labels_).mean() > 0.999
     np.testing.assert_allclose(loaded.distance_map(), som.distance_map(), rtol=1e-5)
+
+
+@pytest.fixture(scope="module")
+def fused():
+    """Skips unless Triton compiles the fused CUDA kernels here (CUDA, Triton with Gluon, a C compiler and the Python
+    headers); returns fastersom._som."""
+    from fastersom import _som
+
+    if not torch.cuda.is_available() or _som._triton(torch.device("cuda")) is None:
+        pytest.skip("no CUDA, no Triton with Gluon, or Triton cannot compile")
+    return _som
+
+
+def torch_path(monkeypatch):
+    monkeypatch.setattr(SOM, "_kernel", lambda self, n_features, top2=False: None)
+
+
+@pytest.mark.parametrize("metric", METRICS)
+@pytest.mark.parametrize(
+    ("n_samples", "n_features", "n_rows", "n_cols"),
+    [
+        (1000, 1, 3, 5),
+        (5000, 6, 7, 9),
+        (3001, 34, 30, 30),
+        (2000, 100, 8, 8),
+        (500, 160, 3, 3),
+        (1000, 44, 21, 21),
+        (2000, 100, 12, 12),
+        (1500, 196, 9, 9),
+    ],
+)
+def test_fused_matches_torch(fused, monkeypatch, metric, n_samples, n_features, n_rows, n_cols):
+    # sizes off the tiles, and few distinct compiled variants. Float32 kernel: 1-6 features without its loop over 16,
+    # 34-196 with a remainder, 160 without (manhattan only); tensor cores (on GPUs with fast TF32): features in
+    # chunks of 32 + 8, 32 + 16, 3 x 32 + 8 and 6 x 32 + 8 (and 16 + 8 in test_fused_ties_and_offsets)
+    rng = np.random.default_rng(0)
+    X = (rng.normal(size=(n_samples, n_features)) + rng.normal(size=n_features) * 3).astype(np.float32)
+    weights = X[rng.choice(n_samples, n_rows * n_cols)] + rng.normal(scale=0.1, size=(n_rows * n_cols, n_features))
+    som = SOM.from_weights(weights.astype(np.float32), n_rows, n_cols, metric=metric, device="cuda")
+    n_nodes = n_rows * n_cols
+    if metric != "manhattan" and n_nodes > 64 and n_nodes * n_features >= 8192:
+        assert som._kernel(n_features) == (
+            "tensor-core" if torch.cuda.get_device_capability() in fused._FAST_TF32 else "float32"
+        )
+    else:
+        assert som._kernel(n_features) == ("float32" if metric == "manhattan" or n_features <= 128 else None)
+    labels, distances = som.predict(X, return_distance=True)
+    error = som.quantization_error(X)
+    top2 = som._search(som._weights, som._kernel(n_features, top2=True), top2=True)(torch.as_tensor(X, device="cuda"))
+    torch_path(monkeypatch)
+    ref_labels, ref_distances = som.predict(X, return_distance=True)
+    # float32 sums in another order may flip near-ties only
+    assert (labels == ref_labels).mean() > 0.999
+    np.testing.assert_allclose(distances, ref_distances, rtol=1e-5, atol=1e-5)
+    assert error == pytest.approx(som.quantization_error(X), rel=1e-6, nan_ok=True)  # NaN: 1 feature, correlation
+    # the two best nodes in order, by the torch path's scores, as their order is arbitrary on exact ties; up to
+    # rounding, which on tensor cores is about that of float32 relative to the largest score
+    ref_scores = som._scores(torch.as_tensor(X, device="cuda"), som._weights)
+    assert (top2[:, 0] != top2[:, 1]).all()
+    ref_top2 = ref_scores.topk(2, 1, largest=False).values
+    atol = 1e-5 * max(1, ref_scores.abs().max().item() / 10)
+    torch.testing.assert_close(ref_scores.gather(1, top2), ref_top2, rtol=1e-5, atol=atol)
+
+
+def test_fused_ties_and_offsets(fused):
+    # duplicate nodes tie exactly: the first wins, as with torch's argmin
+    weights = np.array([[3, 1, 2], [1, 2, 3], [3, 1, 2], [1, 2, 3], [2, 3, 1]], np.float32)
+    for metric in METRICS:
+        som = SOM.from_weights(weights, 1, 5, metric=metric, device="cuda")
+        np.testing.assert_array_equal(som.predict(weights[[1, 0, 4, 3, 2]]), [1, 0, 4, 1, 0])
+    # also when the copies fall in different parts of the nodes, which few samples split across programs (20 features:
+    # on tensor cores where they are fast)
+    for n_features in (6, 20):
+        weights = np.random.default_rng(0).normal(size=(20, 30, n_features)).astype(np.float32)
+        weights[19, 29] = weights[12, 5] = weights[0, 10]
+        som = SOM.from_weights(weights, 20, 30, device="cuda")
+        np.testing.assert_array_equal(som.predict(np.repeat(weights[:1, 10], 3, 0)), [10, 10, 10])
+    # as test_euclidean_with_large_offset and test_correlation_with_large_offset, on the fused path (the 10 x 10 map:
+    # on tensor cores where they are fast)
+    X = np.array([[1e4], [1e4 + 0.01], [1e4 + 1]], np.float32)
+    np.testing.assert_array_equal(SOM.from_weights(X, 1, 3, device="cuda").predict(X), [0, 1, 2])
+    X = (1e4 + np.random.default_rng(0).normal(scale=0.01, size=(100, 100))).astype(np.float32)
+    np.testing.assert_array_equal(SOM.from_weights(X, 10, 10, device="cuda").predict(X), np.arange(100))
+    som = SOM.from_weights(
+        np.array([[1e7, 1e7, 1e7 + 1], [0.1, 0, 1]], np.float32), 1, 2, metric="correlation", device="cuda"
+    )
+    labels, distances = som.predict(np.array([[0, 0, 1]], np.float32), return_distance=True)
+    assert labels[0] == 0
+    assert distances[0] == pytest.approx(0, abs=1e-6)
+
+
+@pytest.mark.parametrize(("n_features", "tensor_cores"), [(8, True), (16, True), (32, False)])
+def test_fused_self_check(fused, n_features, tensor_cores):
+    # variants that the tests above miss, by the exact self-check: on tensor cores 8 features without the loop over
+    # chunks (from Triton 3.8; before, padded to 16) and 16 in a loop of one chunk; the float32 kernel's dot product
+    # without a remainder
+    if tensor_cores and torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("TF32 needs compute capability 8.0")
+    device = torch.device("cuda")
+    fused._triton(device).check(device, n_features, tensor_cores, False, True, False)
+
+
+@pytest.mark.parametrize("metric", METRICS)
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_fused_fit_matches_torch(data, fused, monkeypatch, metric, deterministic):
+    invalid = data.copy()
+    if metric in ("cosine", "correlation"):
+        invalid[::10] = 0  # rows without a BMU (under euclidean all equidistant from the unit-norm initial nodes)
+    kwargs = dict(n_rows=10, n_cols=10, metric=metric, random_state=0, device="cuda", deterministic=deterministic)
+    som = SOM(n_epochs=1, **kwargs).fit(invalid)
+    labels = SOM(n_epochs=3, **kwargs).fit(invalid).labels_
+    torch_path(monkeypatch)
+    ref = SOM(n_epochs=1, **kwargs).fit(invalid)
+    np.testing.assert_allclose(som.weights_, ref.weights_, atol=1e-5)
+    assert (labels == SOM(n_epochs=3, **kwargs).fit(invalid).labels_).mean() > 0.99
+
+
+@pytest.fixture
+def fresh(fused, monkeypatch):
+    """fastersom._som with no kernel checked yet, and the checks of other tests restored afterwards."""
+    monkeypatch.setattr(fused, "_FAILED", set())
+    fused._triton.cache_clear()
+    fused._works.cache_clear()
+    yield fused
+    monkeypatch.undo()
+    fused._triton.cache_clear()
+    fused._works.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (RuntimeError("no compiler\ndetails"), r"\(RuntimeError: no compiler\)"),
+        # its message is the whole compiler command, so the warning says why instead
+        (subprocess.CalledProcessError(1, ["gcc", "driver.c", "-I/include"]), r"\((\S+Python\.h not found|.* 1)\)"),
+    ],
+)
+def test_fused_compile_failure_falls_back(data, fresh, monkeypatch, error, message):
+    som = SOM.from_weights(data[:36], 6, 6, device="cuda")
+    expected = som.predict(data)
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(fresh._triton(torch.device("cuda")), "search", fail)
+    fresh._triton.cache_clear()
+    with pytest.warns(RuntimeWarning, match=message) as record:
+        assert som._kernel(6) is None
+    assert "-I/include" not in str(record[0].message)
+    assert record[0].filename == __file__  # the caller's line, not fastersom's
+    # the batch size is chosen for the torch path, before any batch is searched
+    assert som._batch_size_for(torch.as_tensor(data), som._kernel(6)) <= 2**28 // 36  # the fused one: 2^26 / 6
+    np.testing.assert_array_equal(som.predict(data), expected)  # no second warning
+
+
+def test_fused_kernel_failure_degrades(data, fresh, monkeypatch):
+    # wrong BMUs from the tensor-core kernel (made available here on any GPU) fail its self-check, which leaves the
+    # float32 kernel; a failure of that one leaves the torch path
+    kernels = fresh._triton(torch.device("cuda"))
+    monkeypatch.setattr(fresh, "_FAST_TF32", [torch.cuda.get_device_capability()])
+    bmus = kernels._bmus
+    monkeypatch.setattr(kernels, "_bmus", lambda *args: bmus(*args) // 2 if args[6] else bmus(*args))
+    X = np.random.default_rng(0).normal(size=(1000, 20)).astype(np.float32)
+    som = SOM.from_weights(X[:900], 30, 30, device="cuda")
+    with pytest.warns(RuntimeWarning, match=r"tensor-core BMU kernel failed its self-check \(RuntimeError: wrong"):
+        assert som._kernel(20) == "float32"
+    np.testing.assert_array_equal(som.predict(X)[:900], np.arange(900))  # no second warning
+    assert som._kernel(100) == "float32"  # nor for other variants
+    monkeypatch.setattr(kernels, "_bmus", lambda *args: bmus(*args) + 1)
+    with pytest.warns(RuntimeWarning, match=r"float32 BMU kernel failed its self-check"):
+        assert som._kernel(33) is None

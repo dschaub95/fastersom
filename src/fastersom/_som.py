@@ -18,7 +18,15 @@ References:
     J. Vesanto et al., SOM Toolbox for Matlab 5, Helsinki University of Technology, 2000.
 """
 
+import subprocess
+import sys
+import sysconfig
+import warnings
+from collections.abc import Callable
+from functools import cache
 from math import ceil, isfinite
+from pathlib import Path
+from types import ModuleType
 from typing import Literal, overload
 
 import numpy as np
@@ -28,6 +36,79 @@ from tqdm import tqdm
 
 _METRICS = ("euclidean", "manhattan", "cosine", "correlation")
 _INITS = ("random", "sample")
+# Up to this many features the float32 kernel beats cuBLAS's matrix product plus argmin for euclidean, cosine and
+# correlation (fit on an A100 from 100 to 10,000 nodes: 1.2-2.3x at 34 and 64 features, 1.1-1.2x at 128); beyond it
+# the matrix product is compute-bound and cuBLAS catches up (as fast at 192, 0.9x at 256). Manhattan's fused kernel is
+# always faster than cdist
+_FUSED_MAX_FEATURES = 128
+# Compute capabilities of data-centre GPUs (A100, H100, B200), whose TF32 tensor cores do about 8x the multiply-adds of
+# their float32 cores, so that three TF32 products per float32 product still win; on GeForce, RTX and L40 GPUs they do
+# 1-2x. There the tensor-core kernel searches dot-product scores at any feature count (on an A100, fit 1.5x faster than
+# with the float32 kernel at 34 features from 100 x 100 nodes, 1.4-1.8x at 128, 1.3-1.8x faster than cuBLAS beyond).
+# The capability does not tell variants with cut-down tensor cores such as the H20 (9.0), where it is likely slower;
+# timing both kernels on the device instead could pick differently from run to run, and so change the map
+_FAST_TF32 = ((8, 0), (9, 0), (10, 0))
+_FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
+
+
+def _warn(error: Exception, message: str) -> None:
+    """Warns of a fused kernel's failure, at the user's call into fastersom."""
+    headers = Path(sysconfig.get_path("include"), "Python.h")
+    if not isinstance(error, subprocess.CalledProcessError):
+        reason = f"{type(error).__name__}: " + str(error).partition("\n")[0]
+    elif headers.exists():  # its message is the whole compiler command; the compiler printed why to stderr
+        reason = f"the C compiler exited with status {error.returncode}"
+    else:
+        reason = f"{headers} not found"
+    level = 1
+    while sys._getframe(level).f_globals.get("__name__", "").startswith("fastersom."):
+        level += 1
+    warnings.warn(message.format(reason), RuntimeWarning, stacklevel=level + 1)
+
+
+@cache
+def _triton(device: torch.device) -> ModuleType | None:
+    """fastersom._kernels if Triton compiles kernels for the device, else None: not on ROCm (whose 64-thread warps the
+    tiling lacks), without Triton with Gluon (Triton >= 3.5), and after a warning without a C compiler or the Python
+    headers, which Triton needs for its launchers."""
+    if device.type != "cuda" or torch.version.hip is not None:
+        return None
+    try:
+        from fastersom import _kernels
+    except Exception:  # not only ImportError: an older Gluon can fail on its decorators
+        return None
+    try:
+        _kernels.search(torch.ones(1, 1, device=device), None, None, True, False)  # compiles the nodes' copy only
+    except torch.OutOfMemoryError:
+        raise
+    except Exception as error:
+        _warn(
+            error,
+            "fastersom's fused CUDA kernels failed ({}), using the slower torch path. Triton needs a C compiler and "
+            "the Python headers (e.g. python3-dev, or a uv-managed Python)",
+        )
+        return None
+    return _kernels
+
+
+@cache
+def _works(device: torch.device, kernel: str, n_features: int, metric: str, top2: bool) -> bool:
+    """Whether a fused kernel's variant for these arguments passes its self-check (fastersom._kernels.check), before
+    any batch size is chosen for it. After a failure, which warns, the kernel is off on the device."""
+    if (device, kernel) in _FAILED:
+        return False
+    try:
+        _triton(device).check(
+            device, n_features, kernel == "tensor-core", metric == "manhattan", metric == "euclidean", top2
+        )
+    except torch.OutOfMemoryError:
+        raise
+    except Exception as error:
+        _FAILED.add((device, kernel))
+        fallback = "the float32 kernel or the torch path" if kernel == "tensor-core" else "the torch path"
+        _warn(error, f"fastersom's {kernel} BMU kernel failed its self-check ({{}}), using {fallback}")
+        return False
+    return True
 
 
 def _is_int(value, minimum: int) -> bool:
@@ -60,6 +141,17 @@ def _synchronize(device: torch.device) -> None:
 class SOM:
     """Batch self-organising map on a rectangular grid with a gaussian neighbourhood.
 
+    On CUDA with Triton's Gluon (Triton >= 3.5, part of torch's Linux wheels from torch 2.9), the BMU search of fit,
+    predict, quantization_error and topographic_error runs in a fused kernel that never stores the batch x nodes
+    scores: under manhattan always, under the other metrics up to 128 features, beyond which cuBLAS's matrix product is
+    as fast. It computes in float32 like the torch path, so the BMUs differ only on near-ties. On A100, H100 and B200
+    GPUs, the other metrics' search instead runs on tensor cores at any feature count (for maps of over 64 nodes and
+    nodes x features >= 8192), with float32 accuracy from three TF32 products per product (3xTF32); its BMUs too
+    differ only on near-ties, and match float64's more often than float32's. The first use of a feature count compiles
+    the kernel (2-4 s the first time, cached on disk by Triton), which needs a C compiler and the Python headers, and
+    checks it on a tiny search; a kernel that fails warns and leaves the next one (tensor cores, float32 kernel, torch
+    path).
+
     Args:
         n_rows: Number of grid rows.
         n_cols: Number of grid columns.
@@ -84,20 +176,22 @@ class SOM:
         random_state: Seed for the initialisation.
         device: Torch device. Defaults to cuda, then mps, then cpu.
         batch_size: Samples processed at once in BMU search, aggregation, predict and transform. Affects memory
-            (about batch_size x n_nodes floats) and speed only. Each epoch's update is the same up to float
-            summation order, but over several epochs such rounding differences (as between devices) can flip
-            near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults to 8192 on CPU and on GPUs
-            to 2^28 / n_nodes (where speed levels off), fewer if that does not fit in memory_fraction of the free GPU
-            memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
+            (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
+            epoch's update is the same up to float summation order, but over several epochs such rounding differences
+            (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
+            to 8192 on CPU and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
+            kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
+            recommends; 65536 before torch 2.5).
         memory_fraction: Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
             on CUDA and 0.5 on MPS, whose memory the system and other apps share.
         verbose: Whether fit shows a progress bar over the epochs, with an estimate of the remaining time. On GPUs, it
             then waits for each epoch to finish before starting the next.
         deterministic: Whether fit gives the same map in every run on CUDA and MPS, whose atomic additions of the
-            per-node sums otherwise vary in order, so that near-tied BMUs can flip between runs. The sums then take a
-            matrix product with a one-hot nodes x batch matrix, which on MPS makes fit 1.2-1.8x slower. Also used
-            when ``torch.use_deterministic_algorithms(True)`` is set. The CPU is always deterministic. Maps from
-            different devices still differ by float rounding.
+            per-node sums otherwise vary in order, so that near-tied BMUs can flip between runs. On CUDA the sums then
+            add the samples as 64-bit fixed-point integers, whose sum does not depend on the order, at a small cost;
+            on MPS they take a matrix product with a one-hot nodes x batch matrix, which makes fit 1.2-1.8x slower.
+            Also used when ``torch.use_deterministic_algorithms(True)`` is set. The CPU is always deterministic. Maps
+            from different devices still differ by float rounding.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -206,7 +300,22 @@ class SOM:
             raise ValueError("X contains NaN or infinite values")
         return data
 
-    def _batch_size_for(self, data: torch.Tensor) -> int:
+    def _kernel(self, n_features: int, top2: bool = False) -> str | None:
+        """The fused CUDA kernel of the BMU search, "tensor-core" or "float32", or None for the torch path. The
+        tensor-core kernel searches dot-product scores on the GPUs of _FAST_TF32, for over 64 nodes (a tile of 128 is
+        half empty otherwise) and n_nodes x n_features >= 8192 (below, the float32 kernel is as fast or faster on an
+        A100); a kernel that fails its self-check leaves the next one."""
+        if _triton(self._device) is None:
+            return None
+        n_nodes, manhattan = self.n_rows * self.n_cols, self.metric == "manhattan"
+        kernels = []
+        if not manhattan and n_nodes > 64 and n_nodes * n_features >= 8192:
+            kernels += ["tensor-core"] if torch.cuda.get_device_capability(self._device) in _FAST_TF32 else []
+        kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
+        return next((k for k in kernels if _works(self._device, k, n_features, self.metric, top2)), None)
+
+    def _batch_size_for(self, data: torch.Tensor, kernel: str | None) -> int:
+        """kernel: the fused kernel of the BMU search, if any, which holds no scores."""
         if self.batch_size is not None:
             return self.batch_size
         if self._device.type == "cuda":
@@ -217,9 +326,17 @@ class SOM:
         else:
             return 8192 if self._device.type == "cpu" else 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
+        n_features = data.shape[1]
+        if kernel is not None:
+            # no scores in memory, only up to about 4 copies of the batch (transposed or as two TF32 parts, centred,
+            # with the samples without a BMU zeroed, their BMUs' weights), the TF32 parts' features padded to a
+            # multiple of 8 or 16, which for few features takes several times their memory; speed levels off long
+            # before 2^26 values
+            width = -(-n_features // 16) * 16 if kernel == "tensor-core" else n_features
+            return max(1, min((1 << 26) // n_features, int(fraction * free) // (16 * width + 32)))
         n_nodes = self.n_rows * self.n_cols
         # BMU search holds at most about 2 floats per sample and node, plus copies of the batch
-        return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + data.shape[1]))))
+        return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + n_features))))
 
     def _check_fitted(self) -> None:
         if not hasattr(self, "weights_"):
@@ -276,32 +393,49 @@ class SOM:
         x = x - x[:, :1]  # exact for nearby values, so a large offset does not spoil the float32 mean
         return x - x.mean(1, keepdim=True)
 
-    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Per-node score to minimise.
+    def _operands(self, weights: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Nodes v, bias b and centre c with score (x - c).v + b for all metrics but manhattan (None for no b or c).
 
-        ||w - c||^2 - 2 (x - c).(w - c) with c the mean node (euclidean, ||x - c||^2 dropped; centring keeps a large
-        offset from cancelling), the L1 distance (manhattan) or -x.w / ||w|| of the (for correlation centred) vectors
-        (cosine, correlation).
+        The score is ||w - c||^2 - 2 (x - c).(w - c) with c the mean node (euclidean, ||x - c||^2 dropped; centring
+        keeps a large offset from cancelling) or -x.w / ||w|| of the (for correlation centred) vectors (cosine,
+        correlation). The small weight matrix is scaled and negated, not the batch x nodes scores.
         """
         if self.metric == "euclidean":
             centre = weights.mean(0)
             weights = weights - centre
-            if batch.device.type == "mps":
-                # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
-                # further pass over the scores, which is slower at the small batches of large maps; a column of ones
-                # in the batch and the node norms in the weights make the bias part of a single matmul. On CUDA addmm
-                # fuses the bias into the matmul (cuBLASLt epilogue), so it stays there
-                ones = batch.new_ones(len(batch), 1)
-                return (
-                    torch.cat([batch - centre, ones], 1)
-                    @ torch.cat([-2 * weights, (weights**2).sum(1, keepdim=True)], 1).T
-                )
-            return torch.addmm((weights**2).sum(1), batch - centre, weights.T, alpha=-2)
+            return -2 * weights, (weights**2).sum(1), centre
+        weights = self._centre(weights)
+        return weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12), None, None
+
+    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """Per-node score to minimise: the L1 distance (manhattan), else as in _operands."""
         if self.metric == "manhattan":
             return torch.cdist(batch, weights, p=1)
-        weights = self._centre(weights)
-        # negate the small weight matrix, not the batch x nodes scores
-        return self._centre(batch) @ (weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12)).T
+        nodes, bias, centre = self._operands(weights)
+        if bias is None:
+            return self._centre(batch) @ nodes.T
+        if batch.device.type == "mps":
+            # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
+            # further pass over the scores, which is slower at the small batches of large maps; a column of ones in
+            # the batch and the node norms in the weights make the bias part of a single matmul. On CUDA addmm fuses
+            # the bias into the matmul (cuBLASLt epilogue), so it stays there
+            ones = batch.new_ones(len(batch), 1)
+            return torch.cat([batch - centre, ones], 1) @ torch.cat([nodes, bias[:, None]], 1).T
+        return torch.addmm(bias, batch - centre, nodes.T)
+
+    def _search(
+        self, weights: torch.Tensor, kernel: str | None, top2: bool = False
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
+        """Returns a function of a batch giving each sample's BMU, or with top2 its best two nodes, shape (batch, 2), by
+        the given fused CUDA kernel (from _kernel), without the batch x nodes scores, or the torch path."""
+        if kernel is None:
+            if top2:
+                return lambda batch: self._scores(batch, weights).topk(2, 1, largest=False).indices
+            return lambda batch: self._scores(batch, weights).argmin(1)
+        manhattan = self.metric == "manhattan"
+        nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
+        search = _triton(self._device).search(nodes, bias, centre, manhattan, kernel == "tensor-core", top2)
+        return lambda batch: search(self._centre(batch))
 
     def _score_distances(self, batch: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
         """Distances from the scores of any number of nodes per sample, for every metric but euclidean."""
@@ -315,15 +449,23 @@ class SOM:
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """BMU and, if return_distance, distance to it per sample; -1 and NaN for samples without a BMU."""
         bmus, distances = [], []
-        for batch in data.split(self._batch_size_for(data)):
-            score, bmu = self._scores(batch, weights).min(1)
+        kernel = self._kernel(data.shape[1])
+        search = self._search(weights, kernel)
+        nodes = self._operands(weights)[0] if return_distance and self.metric in ("cosine", "correlation") else None
+        for batch in data.split(self._batch_size_for(data, kernel)):
+            bmu = search(batch)
             bmus.append(bmu)
             if not return_distance:
                 continue
-            if self.metric == "euclidean":  # exact, unlike the scores, so large offsets do not cancel
+            # from the BMUs' weights, not the search's scores: for euclidean exact, so large offsets do not cancel, and
+            # in float32 whichever kernel found the BMU
+            if self.metric == "euclidean":
                 distances.append((batch - weights[bmu]).norm(dim=1))
+            elif self.metric == "manhattan":
+                distances.append((batch - weights[bmu]).abs().sum(1))
             else:
-                distances.append(self._score_distances(batch, score[:, None])[:, 0])
+                score = (self._centre(batch) * nodes[bmu]).sum(1, keepdim=True)
+                distances.append(self._score_distances(batch, score)[:, 0])
         bmu = torch.cat(bmus)
         distance = torch.cat(distances) if return_distance else None
         has_bmu = self._has_bmu(data)
@@ -360,23 +502,39 @@ class SOM:
             self.__dict__.pop(attr, None)
         data = self._check_X(X)
         weights = self._init_weights(data)
-        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data)
+        kernel = self._kernel(data.shape[1])
+        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data, kernel)
         deterministic = self._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
+        # deterministic sums on CUDA add int64 fixed point, which unlike index_add_'s atomic float additions gives the
+        # same result in any order. Scaling each feature by a power of 2 that leaves room for n_samples values rounds
+        # every value to 2^(log2(n_samples) - 62) of the feature's largest magnitude, finer than float32 sums
+        fixed_point = deterministic and self._device.type == "cuda"
+        if fixed_point:
+            _, exponent = torch.frexp(torch.maximum(data.amax(0), -data.amin(0)))  # without a copy of data
+            scale = data.new_ones(data.shape[1], dtype=torch.float64).ldexp_(62 - len(data).bit_length() - exponent)
+            fixed_rows = max(1, (1 << 22) // data.shape[1])
         for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
-            sums, counts = torch.zeros_like(weights), torch.zeros(n_nodes, dtype=torch.long, device=weights.device)
+            sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
+            counts = torch.zeros(n_nodes, dtype=torch.long, device=weights.device)
+            search = self._search(weights, kernel)
             for batch in data.split(batch_size):
-                bmus = self._scores(batch, weights).argmin(1)
+                bmus = search(batch)
                 keep = self._has_bmu(batch)
                 if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count them)
                     batch = batch * keep[:, None]
-                if deterministic:  # a matrix product sums in a fixed order, unlike index_add_'s atomic additions
+                if fixed_point:  # in parts of 2^22 values, as the float64 and int64 copies take 4x the memory
+                    for rows, part in zip(bmus.split(fixed_rows), batch.split(fixed_rows), strict=True):
+                        sums.index_add_(0, rows, part.double().mul_(scale).round_().long())
+                elif deterministic:  # on MPS a matrix product, which sums in a fixed order
                     sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
                 else:
                     sums.index_add_(0, bmus, batch)
                 counts.index_add_(0, bmus, torch.ones_like(bmus) if keep is None else keep.long())
+            if fixed_point:
+                sums = (sums / scale).float()
             smoothed = self._smooth(torch.cat([sums, counts[:, None].float()], 1), sigma)
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
             weights = torch.where(denominator > 0, numerator / denominator, weights)
@@ -431,7 +589,7 @@ class SOM:
         """
         self._check_fitted()
         data = self._check_X(X)
-        batch_size = self._batch_size_for(data)
+        batch_size = self._batch_size_for(data, None)
         # on the CPU, as it can exceed device memory
         distances = torch.empty(len(data), len(self._weights), dtype=torch.float32, device="cpu")
         for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
@@ -457,12 +615,9 @@ class SOM:
         has_bmu = self._has_bmu(data)
         if has_bmu is not None:
             data = data[has_bmu]
-        nodes = torch.cat(
-            [
-                self._scores(batch, self._weights).topk(2, dim=1, largest=False).indices
-                for batch in data.split(self._batch_size_for(data))
-            ]
-        )
+        kernel = self._kernel(data.shape[1], top2=True)
+        search = self._search(self._weights, kernel, top2=True)
+        nodes = torch.cat([search(batch) for batch in data.split(self._batch_size_for(data, kernel))])
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
         return float((offset > 1).cpu().double().mean())
 
