@@ -520,6 +520,15 @@ def assert_ties_and_offsets(device):
     assert np.isnan(som.topographic_error(np.ones((10, 3), np.float32)))  # no sample has a BMU, so none is searched
 
 
+def test_fused_float16(fused, monkeypatch):
+    # 1xTF32 on the GPUs of the tensor-core kernel; elsewhere fit searches in float32
+    X, ref, som, halves = float16_case("cuda", monkeypatch, fused._triton(torch.device("cuda")), "one")
+    if torch.cuda.get_device_capability() in fused._FAST_TF32:
+        assert_float16_fit(X, ref, som, halves)
+    else:
+        assert not any(halves)
+
+
 def test_fused_ties_and_offsets(fused):
     assert_ties_and_offsets("cuda")
 
