@@ -26,9 +26,9 @@
   metric, as they did for euclidean, rather than from the search's scores, so that the distances do not depend on which
   kernel found the BMU (same values up to float32 rounding).
 - On CUDA, `deterministic=True` adds the samples per node as 64-bit fixed-point integers, whose sum does not depend
-  on the order, instead of with a one-hot matrix product, in two words per value so that small values next to a large
-  one in the same feature are kept: on an A100 up to 2x slower than without on 10 x 10 nodes and 3-10% from 100 x 100,
-  instead of 2x. MPS keeps the matrix product.
+  on the order, instead of with a one-hot matrix product, in two words per value, which keep values down to about
+  n_samples^2 * 2^-124 of the feature's largest magnitude (smaller ones count as 0): on an A100 up to 2x slower than
+  without on 10 x 10 nodes and 3-10% from 100 x 100, instead of 2x. MPS keeps the matrix product.
 - Under cosine and correlation, `fit` adds the samples without a BMU as zeros instead of dropping them from each batch,
   which waited for the GPU in every batch: 1.4-1.6x faster with small batches on an A100 (30 x 30 and 100 x 100 nodes,
   `batch_size=8096`) and 1.15-1.25x on the CPU, with the same result.

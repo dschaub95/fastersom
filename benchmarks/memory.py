@@ -192,7 +192,7 @@ def main() -> None:
     for name in ["OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"]:
         os.environ[name] = str(cpus)
 
-    if not args.data.exists() and any(size != 200 for *_, size in configs):
+    if not args.data.exists() and any(size != 200 for _, _, _, size, _ in configs):
         print(f"preparing {args.data}", file=sys.stderr)
         args.data.parent.mkdir(parents=True, exist_ok=True)
         result = uv_run([SPATIOMIC], HERE / "data.py", str(args.data))
