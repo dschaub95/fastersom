@@ -66,6 +66,14 @@ Options:
   by float rounding.
 - `fused=False` turns off the fused [CUDA](#fused-cuda-kernels) and [Metal](#fused-metal-kernels) kernels of the BMU
   search and takes the torch path instead, without compiling anything. It only matters on CUDA and MPS.
+- `precision="float16"` lets `fit`'s BMU search round samples and nodes to 11 significant bits, summing the products in
+  float32, as half inputs to the [Metal kernels](#fused-metal-kernels) on MPS, scaled by powers of 2 into half's range.
+  It applies under euclidean, cosine and correlation from 16 features; elsewhere, and on CUDA, the search stays float32,
+  as do `labels_`, `predict`, `transform` and the error measures. It flips the BMUs of near-tied
+  samples, more on larger maps, which gives an equally good map rather than the same one: in our tests the same
+  quantization error, but a topographic error up to 1.4x higher on synthetic clusters (unchanged in a CPU emulation of
+  0-1 scaled pixels). It is meant for GPUs whose half products are much faster than float32 ones, such as the M5's,
+  where it is untested; on an M3 Max `fit` is only 1.00-1.05x faster.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.
@@ -93,7 +101,8 @@ trade for it, so there is no counterpart to 3xTF32. On an M3 Max (30-core GPU), 
 faster than torch's matrix product from 30 x 30 to 300 x 300 nodes; the search alone is 1.2-10x faster from 5 to 300
 features and 10 x 10 to 500 x 500 nodes, and the search under manhattan 60-260x. The kernels compile from source at
 runtime, in about 0.2 s per feature count with no Xcode or compiler needed, and pass a similar exact self-check, or
-warn and leave the torch path.
+warn and leave the torch path. With `precision="float16"` they take half inputs, which on an M3 Max are no faster; the
+M5's neural accelerators, which Metal 4's tensor operations reach, would be the next step.
 
 ## Benchmark
 

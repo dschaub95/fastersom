@@ -136,39 +136,44 @@ inline void store_row(ushort lane, device long* node, device float* score, long 
 #if DOT
 // the node j of least (x - centre) . w_j + bias_j per sample x. w holds the nodes in blocks of DOT_BN, as fragments
 // (block, DOT_KF, DOT_TN, 8 features, 8 nodes), with the bias in feature D if DOT_BIAS_COLUMN, else in bias; padded
-// nodes have an infinite bias. p: samples, x's row stride, blocks of nodes, blocks per part of the nodes (the second
-// grid axis)
-template <bool CENTRE, bool TOP2>
+// nodes have an infinite bias. In half (precision float16) the samples are multiplied by scale (a power of 2 per
+// feature) and the nodes by another, so that every feature's products come out times 1 / scale[D], and the bias always
+// comes after the products, in float32. p: samples, x's row stride, blocks of nodes, blocks per part of the nodes (the
+// second grid axis)
+template <bool CENTRE, bool TOP2, typename T>
 kernel void bmu_dot(
     device const float* x [[buffer(0)]],
     device const float* centre [[buffer(1)]],
-    device const float* w [[buffer(2)]],
+    device const T* w [[buffer(2)]],
     device const float* bias [[buffer(3)]],
     device long* out_node [[buffer(4)]],
     device float* out_score [[buffer(5)]],
     constant long* p [[buffer(6)]],
+    device const float* scale [[buffer(7)]],
     uint2 tg [[threadgroup_position_in_grid]],
     ushort sg [[simdgroup_index_in_threadgroup]],
     ushort lane [[thread_index_in_simdgroup]],
     ushort tid [[thread_index_in_threadgroup]])
 {
+    constexpr bool HALF = is_same<T, half>::value, COLUMN = DOT_BIAS_COLUMN && !HALF;
     const long n = p[0], ld = p[1], n_blocks = p[2], per_part = p[3];
+    const float unscale = HALF ? scale[D] : 1.0f;
     // the threadgroup's samples minus the centre, with the column of ones and zeros beyond, then each simdgroup's 8
     // into registers
-    threadgroup float xs[DOT_BM * DOT_KP];
+    threadgroup T xs[DOT_BM * DOT_KP];
     const long row0 = long(tg.x) * DOT_BM;
     for (int i = tid; i < DOT_BM * DOT_KP; i += DOT_SG * 32) {
         int r = i / DOT_KP, c = i % DOT_KP;
         long s = row0 + r;
         float v = 0.0f;
         if (s < n) {
-            if (c < D) v = x[s * ld + c] - (CENTRE ? centre[c] : 0.0f);
-            else if (DOT_BIAS_COLUMN && c == D) v = 1.0f;
+            if (c < D) v = (x[s * ld + c] - (CENTRE ? centre[c] : 0.0f)) * (HALF ? scale[c] : 1.0f);
+            else if (COLUMN && c == D) v = 1.0f;
         }
-        xs[i] = v;
+        xs[i] = T(v);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    simdgroup_float8x8 a[DOT_KF];
+    simdgroup_matrix<T, 8, 8> a[DOT_KF];
     for (int kf = 0; kf < DOT_KF; kf++) simdgroup_load(a[kf], xs + sg * 8 * DOT_KP + kf * 8, DOT_KP);
 
     const int col = frag_col(lane);
@@ -176,57 +181,66 @@ kernel void bmu_dot(
     int j1 = 0, j2 = 0;
     const long first = long(tg.y) * per_part, last = min(first + per_part, n_blocks);
     for (long block = first; block < last; block++) {
-        device const float* wb = w + block * (DOT_KF * DOT_TN * 64);
+        device const T* wb = w + block * (DOT_KF * DOT_TN * 64);
         simdgroup_float8x8 acc[DOT_TN];
         for (int tn = 0; tn < DOT_TN; tn++) acc[tn] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
         for (int kf = 0; kf < DOT_KF; kf++)
             for (int tn = 0; tn < DOT_TN; tn++) {
-                simdgroup_float8x8 b;
+                simdgroup_matrix<T, 8, 8> b;
                 simdgroup_load(b, wb + (kf * DOT_TN + tn) * 64, 8);
                 simdgroup_multiply_accumulate(acc[tn], a[kf], b, acc[tn]);
             }
         const int node = int(block) * DOT_BN + col;
         for (int tn = 0; tn < DOT_TN; tn++) {
-            float2 bias_tn = DOT_BIAS_COLUMN ? float2(0.0f) : *(device const float2*)(bias + node + tn * 8);
+            float2 bias_tn = COLUMN ? float2(0.0f) : *(device const float2*)(bias + node + tn * 8);
             auto e = acc[tn].thread_elements();
-            update<TOP2>(e[0] + bias_tn[0], node + tn * 8, b1, j1, b2, j2);
-            update<TOP2>(e[1] + bias_tn[1], node + tn * 8 + 1, b1, j1, b2, j2);
+            update<TOP2>(e[0] * unscale + bias_tn[0], node + tn * 8, b1, j1, b2, j2);
+            update<TOP2>(e[1] * unscale + bias_tn[1], node + tn * 8 + 1, b1, j1, b2, j2);
         }
     }
     store_row<TOP2>(lane, out_node, out_score, n, row0 + sg * 8 + frag_row(lane), tg.y, b1, j1, b2, j2);
 }
 
-#define BMU_DOT(name, CENTRE, TOP2)                                                                                  \
-    template [[host_name(name)]] kernel void bmu_dot<CENTRE, TOP2>(                                                  \
-        device const float*, device const float*, device const float*, device const float*, device long*,             \
-        device float*, constant long*, uint2, ushort, ushort, ushort);
-BMU_DOT("bmu_dot", false, false)
-BMU_DOT("bmu_dot_centre", true, false)
-BMU_DOT("bmu_dot_top2", false, true)
-BMU_DOT("bmu_dot_centre_top2", true, true)
+#define BMU_DOT(name, CENTRE, TOP2, T)                                                                               \
+    template [[host_name(name)]] kernel void bmu_dot<CENTRE, TOP2, T>(                                               \
+        device const float*, device const float*, device const T*, device const float*, device long*, device float*,  \
+        constant long*, device const float*, uint2, ushort, ushort, ushort);
+BMU_DOT("bmu_dot", false, false, float)
+BMU_DOT("bmu_dot_centre", true, false, float)
+BMU_DOT("bmu_dot_top2", false, true, float)
+BMU_DOT("bmu_dot_centre_top2", true, true, float)
+BMU_DOT("bmu_dot_half", false, false, half)
+BMU_DOT("bmu_dot_centre_half", true, false, half)
+BMU_DOT("bmu_dot_top2_half", false, true, half)
+BMU_DOT("bmu_dot_centre_top2_half", true, true, half)
 #endif
 
 // bmu_dot's search for many features or nodes: the samples come padded and centred, (rows, ST_KP) with the column of
 // ones in feature D, the nodes as (ST_KP, nodes) with the bias in feature D (infinite for padded nodes). Per block of
 // ST_BN nodes, each chunk of ST_BK features of the nodes goes to threadgroup memory once for the threadgroup's ST_SG
 // simdgroups, which take their samples' fragments straight from device memory; the threadgroup memory stays small,
-// so that many threadgroups share a core. p as for bmu_dot, then the nodes' row stride
-template <bool TOP2>
+// so that many threadgroups share a core. In half, both come scaled as for bmu_dot, their products times unscale[0],
+// with zeros in feature D and the bias in bias. p as for bmu_dot, with the nodes' row stride fifth
+template <bool TOP2, typename T>
 kernel void bmu_staged(
-    device const float* x [[buffer(0)]],
-    device const float* w [[buffer(1)]],
-    device long* out_node [[buffer(2)]],
-    device float* out_score [[buffer(3)]],
-    constant long* p [[buffer(4)]],
+    device const T* x [[buffer(0)]],
+    device const T* w [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device long* out_node [[buffer(3)]],
+    device float* out_score [[buffer(4)]],
+    constant long* p [[buffer(5)]],
+    device const float* unscale [[buffer(6)]],
     uint2 tg [[threadgroup_position_in_grid]],
     ushort sg [[simdgroup_index_in_threadgroup]],
     ushort lane [[thread_index_in_simdgroup]],
     ushort tid [[thread_index_in_threadgroup]])
 {
+    constexpr bool HALF = is_same<T, half>::value;
     const long n = p[0], ld = p[1], n_blocks = p[2], per_part = p[3], ld_w = p[4];
-    threadgroup float ws[ST_BK * ST_BN];
+    const float product_scale = HALF ? unscale[0] : 1.0f;
+    threadgroup T ws[ST_BK * ST_BN];
     const long row0 = long(tg.x) * ST_BM + sg * ST_TM * 8;
-    device const float* xg = x + row0 * ld;
+    device const T* xg = x + row0 * ld;
     const int col = frag_col(lane);
     float b1[ST_TM], b2[ST_TM];
     int j1[ST_TM], j2[ST_TM];
@@ -243,14 +257,14 @@ kernel void bmu_staged(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             for (int i = tid; i < ST_BK * ST_BN / 4; i += ST_SG * 32) {
                 int k = i / (ST_BN / 4), c = i % (ST_BN / 4);
-                ((threadgroup float4*)ws)[i] = ((device const float4*)(w + (k0 + k) * ld_w + block * ST_BN))[c];
+                ((threadgroup vec<T, 4>*)ws)[i] = ((device const vec<T, 4>*)(w + (k0 + k) * ld_w + block * ST_BN))[c];
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             for (int k8 = 0; k8 < ST_BK; k8 += 8) {
-                simdgroup_float8x8 b[ST_TN];
+                simdgroup_matrix<T, 8, 8> b[ST_TN];
                 for (int tn = 0; tn < ST_TN; tn++) simdgroup_load(b[tn], ws + k8 * ST_BN + tn * 8, ST_BN);
                 for (int tm = 0; tm < ST_TM; tm++) {
-                    simdgroup_float8x8 a;
+                    simdgroup_matrix<T, 8, 8> a;
                     simdgroup_load(a, xg + tm * 8 * ld + k0 + k8, ld);
                     for (int tn = 0; tn < ST_TN; tn++)
                         simdgroup_multiply_accumulate(acc[tm][tn], a, b[tn], acc[tm][tn]);
@@ -258,24 +272,28 @@ kernel void bmu_staged(
             }
         }
         const int node = int(block) * ST_BN + col;
-        for (int tn = 0; tn < ST_TN; tn++)
+        for (int tn = 0; tn < ST_TN; tn++) {
+            float2 bias_tn = HALF ? *(device const float2*)(bias + node + tn * 8) : float2(0.0f);
             for (int tm = 0; tm < ST_TM; tm++) {
                 auto e = acc[tm][tn].thread_elements();
-                update<TOP2>(e[0], node + tn * 8, b1[tm], j1[tm], b2[tm], j2[tm]);
-                update<TOP2>(e[1], node + tn * 8 + 1, b1[tm], j1[tm], b2[tm], j2[tm]);
+                update<TOP2>(e[0] * product_scale + bias_tn[0], node + tn * 8, b1[tm], j1[tm], b2[tm], j2[tm]);
+                update<TOP2>(e[1] * product_scale + bias_tn[1], node + tn * 8 + 1, b1[tm], j1[tm], b2[tm], j2[tm]);
             }
+        }
     }
     for (int tm = 0; tm < ST_TM; tm++)
         store_row<TOP2>(lane, out_node, out_score, n, row0 + tm * 8 + frag_row(lane), tg.y, b1[tm], j1[tm], b2[tm],
                         j2[tm]);
 }
 
-#define BMU_STAGED(name, TOP2)                                                                                       \
-    template [[host_name(name)]] kernel void bmu_staged<TOP2>(                                                       \
-        device const float*, device const float*, device long*, device float*, constant long*, uint2, ushort, ushort, \
-        ushort);
-BMU_STAGED("bmu_staged", false)
-BMU_STAGED("bmu_staged_top2", true)
+#define BMU_STAGED(name, TOP2, T)                                                                                    \
+    template [[host_name(name)]] kernel void bmu_staged<TOP2, T>(                                                    \
+        device const T*, device const T*, device const float*, device long*, device float*, constant long*,           \
+        device const float*, uint2, ushort, ushort, ushort);
+BMU_STAGED("bmu_staged", false, float)
+BMU_STAGED("bmu_staged_top2", true, float)
+BMU_STAGED("bmu_staged_half", false, half)
+BMU_STAGED("bmu_staged_top2_half", true, half)
 
 // adds value to the 64-bit integer at word (its low word first) by two 32-bit atomic additions, as Apple GPUs have no
 // 64-bit one: the low word's returns its old value, from which follows the carry into the high word, so that the sum
@@ -438,42 +456,88 @@ def _padded_bias(nodes: torch.Tensor, bias: torch.Tensor | None, n_padded: int) 
     return padded
 
 
-def _dot_nodes(nodes: torch.Tensor, bias: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """The nodes as bmu_dot loads them: (fragments, padded bias, blocks)."""
+# the magnitudes of samples that precision="float16" takes (else float32), so that all scales of half_scales stay
+# within float32's normal exponents
+HALF_RANGE = (2.0**-30, 2.0**30)
+
+
+def in_half_range(magnitude: torch.Tensor) -> bool:
+    """Whether the samples' largest |x| per feature lie within HALF_RANGE (or are 0)."""
+    low, high = HALF_RANGE
+    return bool(((magnitude == 0) | ((magnitude >= low) & (magnitude <= high))).all())
+
+
+def _power_of_2(exponent: torch.Tensor) -> torch.Tensor:
+    """2^exponent (integers within float32's normal exponents) as float32, exact, from its bits."""
+    return ((exponent.int() + 127) << 23).view(torch.float32)
+
+
+def _exponent(magnitude: torch.Tensor) -> torch.Tensor:
+    """An integer e per element with magnitude < 2^e (magnitudes clamped to HALF_RANGE), on the device, as frexp is
+    not on MPS; log2's rounding can only raise it by 1."""
+    low, high = HALF_RANGE
+    return torch.floor(torch.log2(magnitude.float().clamp(low, high))) + 1
+
+
+def half_scales(nodes: torch.Tensor, bound: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """For precision float16: powers of 2 per feature for the samples, whose |x - centre| is at most bound, and for the
+    nodes, that put both below about 2^8 in half (65504 at most, 2^-14 the smallest normal) and every feature's
+    products at 2^g times their value: (the samples' scales with 2^-g appended, the nodes' scales). Computed on the
+    device, as synchronising in every epoch would stall fit on small maps."""
+    exponent_x, exponent_w = _exponent(bound), _exponent(nodes.abs().amax(0))
+    g = 16 - (exponent_x + exponent_w).amax()
+    return torch.cat([_power_of_2(8 - exponent_x), _power_of_2(-g)[None]]), _power_of_2(g - 8 + exponent_x)
+
+
+def _dot_nodes(
+    nodes: torch.Tensor, bias: torch.Tensor | None, w_scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """The nodes as bmu_dot loads them: (fragments, padded bias, blocks); with w_scale scaled, in half, without the
+    bias column."""
     n_nodes, n_features = nodes.shape
     block, kf = _DOT_TN * 8, _fragments(n_features)
     n_blocks = -(-n_nodes // block)
     padded_bias = _padded_bias(nodes, bias, n_blocks * block)
     full = nodes.new_zeros(n_blocks * block, kf * 8)
-    full[:n_nodes, :n_features] = nodes
-    if n_features % 8:
+    full[:n_nodes, :n_features] = nodes if w_scale is None else nodes * w_scale
+    if n_features % 8 and w_scale is None:
         full[:, n_features] = padded_bias
     fragments = full.view(n_blocks, _DOT_TN, 8, kf, 8).permute(0, 3, 1, 4, 2).contiguous()
-    return fragments, padded_bias, n_blocks
+    return (fragments if w_scale is None else fragments.half()), padded_bias, n_blocks
 
 
-def _staged_nodes(nodes: torch.Tensor, bias: torch.Tensor | None) -> tuple[torch.Tensor, int]:
-    """The nodes as bmu_staged loads them, (features, nodes) with the bias in feature n_features: (nodes, blocks)."""
+def _staged_nodes(
+    nodes: torch.Tensor, bias: torch.Tensor | None, w_scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """The nodes as bmu_staged loads them, (features, nodes) with the bias in feature n_features: (nodes, padded bias,
+    blocks); with w_scale scaled, in half, with zeros in feature n_features and the bias added after the products."""
     n_nodes, n_features = nodes.shape
     block = _STAGED_TN * 8
     n_blocks = -(-n_nodes // block)
+    padded_bias = _padded_bias(nodes, bias, n_blocks * block)
     full = nodes.new_zeros(sample_width(n_features), n_blocks * block)
-    full[:n_features, :n_nodes] = nodes.T
-    full[n_features] = _padded_bias(nodes, bias, n_blocks * block)
-    return full, n_blocks
+    if w_scale is None:
+        full[:n_features, :n_nodes] = nodes.T
+        full[n_features] = padded_bias
+        return full, padded_bias, n_blocks
+    full[:n_features, :n_nodes] = (nodes * w_scale).T
+    return full.half(), padded_bias, n_blocks
 
 
-def _staged_samples(x: torch.Tensor, centre: torch.Tensor | None) -> torch.Tensor:
+def _staged_samples(x: torch.Tensor, centre: torch.Tensor | None, x_scale: torch.Tensor | None) -> torch.Tensor:
     """The samples as bmu_staged loads them: x - centre with a column of ones for the bias, zeros beyond, and rows to a
-    multiple of a threadgroup's."""
+    multiple of a threadgroup's; with x_scale scaled, in half, without the column of ones."""
     n, n_features = x.shape
     block = _STAGED_SG * _STAGED_TM * 8
-    out = x.new_zeros(-(-n // block) * block, sample_width(n_features))
-    if centre is None:
-        out[:n, :n_features] = x
+    out = x.new_zeros(
+        -(-n // block) * block, sample_width(n_features), dtype=torch.half if x_scale is not None else None
+    )
+    rows = x if centre is None else x - centre
+    if x_scale is None:
+        out[:n, :n_features] = rows
+        out[:n, n_features] = 1
     else:
-        torch.sub(x, centre, out=out[:n, :n_features])
-    out[:n, n_features] = 1
+        out[:n, :n_features] = rows * x_scale
     return out
 
 
@@ -508,9 +572,11 @@ def _bmus(
     top2: bool,
     parts: int | None,
     ld_w: int = 0,
+    after: tuple = (),
 ) -> torch.Tensor:
     """The BMUs of the first n_samples rows of x (as the kernel loads them) by the kernel, given its node arguments,
-    samples and threads per threadgroup, blocks of nodes and, for bmu_staged, the nodes' row stride."""
+    samples and threads per threadgroup, blocks of nodes, for bmu_staged the nodes' row stride, and the kernel's
+    arguments after the parameters."""
     if n_samples == 0:  # e.g. none of the samples has a BMU, which leaves no threadgroups to split the nodes over
         return torch.empty((0, 2) if top2 else (0,), dtype=torch.long, device=x.device)
     n_parts, per_part = _parts(n_samples, block_m, n_blocks, parts)
@@ -519,7 +585,7 @@ def _bmus(
     score = torch.empty(rows, n_samples, dtype=torch.float32, device=x.device)
     params = [n_samples, x.stride(0), n_blocks, per_part, ld_w]
     grid = (-(-n_samples // block_m) * threads, n_parts)
-    kernel(x, *args, node, score, params, threads=grid, group_size=(threads, 1))
+    kernel(x, *args, node, score, params, *after, threads=grid, group_size=(threads, 1))
     if top2:
         return node.T if n_parts == 1 else node.gather(0, score.topk(2, 0, largest=False).indices).T
     return node[0] if n_parts == 1 else node.gather(0, score.argmin(0, keepdim=True))[0]
@@ -532,14 +598,16 @@ def search(
     manhattan: bool,
     top2: bool = False,
     *,
+    bound: torch.Tensor | None = None,
     parts: int | None = None,
     staged: bool | None = None,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Returns a function of samples x, shape (n, n_features), giving each one's BMU (int64): the node j with the
     least (x - centre) . nodes_j + bias_j, or ||x - nodes_j||_1 if manhattan, the first on ties; with top2 the best
-    two, shape (n, 2), in either order on ties, as torch's topk. parts sets the parts the nodes are split into (else
-    chosen from the batch), whose results torch then reduces; staged whether bmu_staged searches dot products (else
-    chosen from the sizes)."""
+    two, shape (n, 2), in either order on ties, as torch's topk. With bound, the most |x - centre| per feature of the
+    samples to come (within HALF_RANGE), dot products take half inputs, scaled by half_scales (precision float16).
+    parts sets the parts the nodes are split into (else chosen from the batch), whose results
+    torch then reduces; staged whether bmu_staged searches dot products (else chosen from the sizes)."""
     nodes = nodes.float().contiguous()
     n_nodes, n_features = nodes.shape
     library = _library(n_features)
@@ -553,23 +621,29 @@ def search(
 
         return _in_parts(find, _MAX_THREADS // _L1_THREADS * block_m)
     centre = None if centre is None else centre.float().contiguous()
+    x_scale, w_scale = (None, None) if bound is None else half_scales(nodes, bound)
+    suffix += "" if bound is None else "_half"
     if staged is None:
         staged = _use_staged(n_nodes, n_features)
     if staged:
-        w, n_blocks = _staged_nodes(nodes, bias)
+        w, padded_bias, n_blocks = _staged_nodes(nodes, bias, w_scale)
         kernel, block_m, threads = getattr(library, "bmu_staged" + suffix), _STAGED_SG * _STAGED_TM * 8, _STAGED_SG * 32
 
+        after = (padded_bias if x_scale is None else x_scale[-1:],)  # the products' scale, not read in float32
+
         def find(x: torch.Tensor) -> torch.Tensor:
-            samples = _staged_samples(x, centre)
-            return _bmus(samples, len(x), kernel, (w,), block_m, threads, n_blocks, top2, parts, w.shape[1])
+            samples = _staged_samples(x, centre, None if x_scale is None else x_scale[:-1])
+            args = (w, padded_bias)
+            return _bmus(samples, len(x), kernel, args, block_m, threads, n_blocks, top2, parts, w.shape[1], after)
 
         return _in_parts(find, _MAX_THREADS // threads * block_m)
-    w, padded_bias, n_blocks = _dot_nodes(nodes, bias)
+    w, padded_bias, n_blocks = _dot_nodes(nodes, bias, w_scale)
     kernel = getattr(library, "bmu_dot" + ("_centre" if centre is not None else "") + suffix)
-    args = (w if centre is None else centre, w, padded_bias)  # the centre is not read without one
+    args = (padded_bias if centre is None else centre, w, padded_bias)  # the centre is not read without one
+    after = (padded_bias if x_scale is None else x_scale,)  # nor the scale in float32
 
     def find(x: torch.Tensor) -> torch.Tensor:
-        return _bmus(_rows(x), len(x), kernel, args, _DOT_SG * 8, _DOT_SG * 32, n_blocks, top2, parts)
+        return _bmus(_rows(x), len(x), kernel, args, _DOT_SG * 8, _DOT_SG * 32, n_blocks, top2, parts, 0, after)
 
     return _in_parts(find, _MAX_THREADS // (_DOT_SG * 32) * _DOT_SG * 8)
 
@@ -587,13 +661,13 @@ def fixed_sums(
         library.fixed_sums(part, part_bmus, shift, sums, lows, params, threads=part.numel(), group_size=256)
 
 
-def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, top2: bool) -> None:
+def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, top2: bool, half: bool = False) -> None:
     """Raises unless the kernels for these arguments find the exact BMUs of a small search, with the nodes in one part
-    and in several, for dot products by bmu_staged and, if it takes this many features, bmu_dot. 250 samples and 250
-    nodes fill no tile, so that the partial tiles and padded nodes run too, and with bias the samples have an integer
-    centre. Its values are -1, 0 or 1, so every sum is an integer below 2^24, exact in float32 in any order, also in
-    the reference on the CPU. Each node is there twice, in different parts of the nodes, so that ties must go to the
-    first."""
+    and in several, for dot products by bmu_staged and, if it takes this many features, bmu_dot, with half the half
+    variants. 250 samples and 250 nodes fill no tile, so that the partial tiles and padded nodes run too, and with bias
+    the samples have an integer centre. Its values are -1, 0 or 1, exact also in half and scaled by powers of 2, so
+    that every sum is an integer below 2^24, exact in float32 in any order, also in the reference on the CPU. Each
+    node is there twice, in different parts of the nodes, so that ties must go to the first."""
     generator = torch.Generator().manual_seed(0)
     # an explicit generator and dtype keep it on the CPU in float32, which torch.set_default_device or
     # set_default_dtype would change otherwise
@@ -606,9 +680,11 @@ def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, to
         scores = (x if centre is None else x - centre) @ nodes.T + (offsets[:, 0] if bias else 0)
     best2 = scores.topk(2, 1, largest=False).values
     b, c = (None, None) if not bias else (offsets[:, 0].to(device), centre.to(device))
+    bound = None if not half else (x if centre is None else x - centre).abs().amax(0).to(device)
     kernels = [True, False] if _fragments(n_features) <= _REGISTER_FRAGMENTS else [True]  # bmu_staged, bmu_dot
     for staged, parts in product([None] if manhattan else kernels, (1, 4)):
-        found = search(nodes.to(device), b, c, manhattan, top2, parts=parts, staged=staged)(x.to(device)).cpu()
+        find = search(nodes.to(device), b, c, manhattan, top2, bound=bound, parts=parts, staged=staged)
+        found = find(x.to(device)).cpu()
         if top2:
             exact = torch.equal(scores.gather(1, found).sort(1).values, best2) and (found[:, 0] != found[:, 1]).all()
         else:

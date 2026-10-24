@@ -49,6 +49,18 @@ _FUSED_MAX_FEATURES = 128
 # timing both kernels on the device instead could pick differently from run to run, and so change the map
 _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
+_PRECISIONS = ("float32", "float16")
+# precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
+# with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
+# 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
+_HALF_MIN_FEATURES = 16
+_METAL = ("metal", "metal-float16")
+# what a failed kernel leaves, and how the warnings name the kernels
+_FALLBACKS = {
+    "tensor-core": "the float32 kernel or the torch path",
+    "metal-float16": "the float32 Metal kernel or the torch path",
+}
+_NAMES = {"metal": "Metal", "metal-float16": "Metal float16"}
 
 
 def _warn(error: Exception, message: str) -> None:
@@ -118,18 +130,17 @@ def _works(device: torch.device, kernel: str, n_features: int, metric: str, top2
     if (device, kernel) in _FAILED:
         return False
     try:
-        if kernel == "metal":
-            _metal(device).check(device, n_features, metric == "manhattan", metric == "euclidean", top2)
+        manhattan, bias = metric == "manhattan", metric == "euclidean"
+        if kernel in _METAL:
+            _metal(device).check(device, n_features, manhattan, bias, top2, kernel == "metal-float16")
         else:
-            _triton(device).check(
-                device, n_features, kernel == "tensor-core", metric == "manhattan", metric == "euclidean", top2
-            )
+            _triton(device).check(device, n_features, kernel == "tensor-core", manhattan, bias, top2)
     except Exception as error:
         if _out_of_memory(error):
             raise
         _FAILED.add((device, kernel))
-        fallback = "the float32 kernel or the torch path" if kernel == "tensor-core" else "the torch path"
-        failed = "Metal BMU kernel failed to compile or its" if kernel == "metal" else f"{kernel} BMU kernel failed its"
+        name, fallback = _NAMES.get(kernel, kernel), _FALLBACKS.get(kernel, "the torch path")
+        failed = f"{name} BMU kernel failed " + ("to compile or its" if kernel in _METAL else "its")
         _warn(error, f"fastersom's {failed} self-check ({{}}), using {fallback}")
         return False
     return True
@@ -237,6 +248,16 @@ class SOM:
             from different devices still differ by float rounding.
         fused: Whether the BMU search on CUDA and MPS may use the fused kernels. With False, it never compiles or
             launches them and takes the torch path, as on the CPU.
+        precision: ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11
+            significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
+            scaled by powers of 2 per feature into half's range. Only under euclidean, cosine and correlation from 16
+            features with the Metal kernels, else float32 (as on CUDA); labels_, predict, transform and the error
+            measures stay float32. It flips the BMUs of near-tied
+            samples, more of them on larger maps (in a CPU emulation of 0-1 scaled pixels, 0.6% at 30 x 30 nodes and
+            36% at 300 x 300), which gives an equally good map rather than the same one (quantization and
+            topographic error and Leiden clusters of the nodes within the spread of refitting without 1% of the
+            samples). On an M3 Max the search is only 1.03-1.13x faster, as its half matrices are no faster than
+            float32 ones; M5 GPUs should gain more, which is untested.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -260,6 +281,7 @@ class SOM:
         verbose: bool = False,
         deterministic: bool = False,
         fused: bool = True,
+        precision: str = "float32",
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -275,6 +297,7 @@ class SOM:
         self.verbose = verbose
         self.deterministic = deterministic
         self.fused = fused
+        self.precision = precision
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -298,6 +321,7 @@ class SOM:
         state.setdefault("verbose", False)  # pickled before 0.3.2
         state.setdefault("deterministic", False)  # pickled before 0.3.2
         state.setdefault("fused", True)  # pickled by 0.3.2 and before
+        state.setdefault("precision", "float32")  # pickled by 0.4.0 and before
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -306,6 +330,8 @@ class SOM:
     def _setup(self, fall_back: bool = False) -> None:
         if self.metric not in _METRICS:
             raise ValueError(f"metric must be one of {_METRICS}, got {self.metric!r}")
+        if self.precision not in _PRECISIONS:
+            raise ValueError(f"precision must be one of {_PRECISIONS}, got {self.precision!r}")
         if isinstance(self.init, str) and self.init not in _INITS:
             raise ValueError(f"init must be one of {_INITS} or an array of weights, got {self.init!r}")
         for name, minimum in (("n_rows", 1), ("n_cols", 1), ("n_epochs", 0)):
@@ -348,23 +374,25 @@ class SOM:
             raise ValueError("X contains NaN or infinite values")
         return data
 
-    def _kernel(self, n_features: int, top2: bool = False) -> str | None:
+    def _kernel(self, n_features: int, top2: bool = False, half: bool = False) -> str | None:
         """The fused kernel of the BMU search, on CUDA "tensor-core" or "float32", on MPS "metal", or None for the
-        torch path. The tensor-core kernel searches dot-product scores on the GPUs of _FAST_TF32, for over 64 nodes (a
-        tile of 128 is half empty otherwise) and n_nodes x n_features >= 8192 (below, the float32 kernel is as fast or
-        faster on an A100); a kernel that fails its self-check leaves the next one."""
+        torch path; with half (fit under precision="float16") first "metal-float16" for dot-product scores from
+        _HALF_MIN_FEATURES features. The tensor-core kernel searches dot-product scores on the GPUs of _FAST_TF32,
+        for over 64 nodes (a tile of 128 is half empty otherwise) and n_nodes x n_features >= 8192 (below, the float32
+        kernel is as fast or faster on an A100); a kernel that fails its self-check leaves the next one."""
         if not self.fused:
             return None
-        if _metal(self._device) is not None:
-            metal = _metal(self._device).supported(n_features, self.metric == "manhattan")
-            return "metal" if metal and _works(self._device, "metal", n_features, self.metric, top2) else None
-        if _triton(self._device) is None:
-            return None
         n_nodes, manhattan = self.n_rows * self.n_cols, self.metric == "manhattan"
+        half = half and not manhattan and n_features >= _HALF_MIN_FEATURES
         kernels = []
-        if not manhattan and n_nodes > 64 and n_nodes * n_features >= 8192:
-            kernels += ["tensor-core"] if torch.cuda.get_device_capability(self._device) in _FAST_TF32 else []
-        kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
+        if _metal(self._device) is not None:
+            kernels += ["metal-float16"] if half else []
+            kernels += ["metal"] if _metal(self._device).supported(n_features, manhattan) else []
+        elif _triton(self._device) is not None:
+            if not manhattan and n_nodes > 64 and n_nodes * n_features >= 8192:
+                fast_tf32 = torch.cuda.get_device_capability(self._device) in _FAST_TF32
+                kernels += ["tensor-core"] if fast_tf32 else []
+            kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
         return next((k for k in kernels if _works(self._device, k, n_features, self.metric, top2)), None)
 
     def _batch_size_for(self, data: torch.Tensor, kernel: str | None) -> int:
@@ -388,7 +416,7 @@ class SOM:
             # before 2^26 values
             if kernel == "tensor-core":
                 per_sample = 16 * (-(-n_features // 16) * 16) + 32
-            elif kernel == "metal":
+            elif kernel in _METAL:
                 per_sample = 4 * (4 * n_features + _metal(self._device).sample_width(n_features)) + 32
             else:
                 per_sample = 16 * n_features + 32
@@ -483,17 +511,26 @@ class SOM:
         return torch.addmm(bias, batch - centre, nodes.T)
 
     def _search(
-        self, weights: torch.Tensor, kernel: str | None, top2: bool = False
+        self, weights: torch.Tensor, kernel: str | None, top2: bool = False, magnitude: torch.Tensor | None = None
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         """Returns a function of a batch giving each sample's BMU, or with top2 its best two nodes, shape (batch, 2), by
-        the given fused kernel (from _kernel), without the batch x nodes scores, or the torch path."""
+        the given fused kernel (from _kernel), without the batch x nodes scores, or the torch path. magnitude: for
+        "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales."""
         if kernel is None:
             if top2:
                 return lambda batch: self._scores(batch, weights).topk(2, 1, largest=False).indices
             return lambda batch: self._scores(batch, weights).argmin(1)
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
-        if kernel == "metal":
+        if kernel == "metal-float16":
+            if self.metric == "euclidean":
+                bound = magnitude + centre.abs()
+            elif self.metric == "correlation":  # rows centred twice (see _centre), each within twice the largest |x|
+                bound = (4 * magnitude.amax()).expand_as(magnitude)
+            else:
+                bound = magnitude
+            search = _metal(self._device).search(nodes, bias, centre, manhattan, top2, bound=bound)
+        elif kernel == "metal":
             search = _metal(self._device).search(nodes, bias, centre, manhattan, top2)
         else:
             search = _triton(self._device).search(nodes, bias, centre, manhattan, kernel == "tensor-core", top2)
@@ -564,7 +601,7 @@ class SOM:
             self.__dict__.pop(attr, None)
         data = self._check_X(X)
         weights = self._init_weights(data)
-        kernel = self._kernel(data.shape[1])
+        kernel = self._kernel(data.shape[1], half=self.precision == "float16")
         deterministic = self._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
@@ -576,10 +613,14 @@ class SOM:
         # to about n_samples * 2^-62 of the feature's largest magnitude (a node of only small values could sum to 0); a
         # second word adds the rounding remainders, exact in float64, scaled by 2^(62 - log2(n_samples)), so that values
         # are lost only below about n_samples^2 * 2^-124 of the largest
-        fixed_point = deterministic and (not mps or kernel == "metal")
+        fixed_point = deterministic and (not mps or kernel in _METAL)
         n_nodes, batch_size = weights.shape[0], self._batch_size_for(data, kernel)
-        if fixed_point:
+        magnitude = None
+        if fixed_point or kernel == "metal-float16":
             magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
+        if kernel == "metal-float16" and not _metal(self._device).in_half_range(magnitude):
+            kernel = "metal"  # whose scales would leave float32's exponents
+        if fixed_point:
             low_shift = 62 - len(data).bit_length()  # remainders within +-0.5, so their sums below 2^61
             # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
             _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
@@ -596,7 +637,7 @@ class SOM:
             lows = torch.zeros_like(sums) if fixed_point else None
             # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
             counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=weights.device)
-            search = self._search(weights, kernel)
+            search = self._search(weights, kernel, magnitude=magnitude)
             for batch in data.split(batch_size):
                 bmus = search(batch)
                 keep = self._has_bmu(batch)

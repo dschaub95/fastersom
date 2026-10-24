@@ -141,6 +141,7 @@ def test_invalid_parameters(data):
         (dict(n_epochs=-1), "n_epochs"),
         (dict(batch_size=0), "batch_size"),
         (dict(memory_fraction=0), "memory_fraction"),
+        (dict(precision="bfloat16"), "precision"),
     ]:
         with pytest.raises(ValueError, match=match):
             SOM(**{"n_rows": 5, "n_cols": 4, **kwargs}, device=CPU).fit(data)
@@ -326,7 +327,7 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[0], labels)
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[1], distances)
     state = som.__getstate__()
-    del state["memory_fraction"], state["verbose"], state["deterministic"], state["fused"]  # as pickled by 0.2
+    del state["memory_fraction"], state["verbose"], state["deterministic"], state["fused"], state["precision"]  # 0.2
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
     np.testing.assert_array_equal(loaded.predict(data), labels)
@@ -521,6 +522,30 @@ def assert_ties_and_offsets(device):
 
 def test_fused_ties_and_offsets(fused):
     assert_ties_and_offsets("cuda")
+
+
+def float16_case(device):
+    """Pixel-like data of 20 features, 0-1 scaled with clusters, and a float32 and a float16 fit of a 20 x 20 map."""
+    rng = np.random.default_rng(0)
+    centres = rng.random((12, 20))
+    X = np.clip(centres[rng.integers(12, size=20_000)] + rng.normal(scale=0.05, size=(20_000, 20)), 0, 1)
+    X = X.astype(np.float32)
+    kwargs = dict(n_rows=20, n_cols=20, random_state=0, device=device)
+    return X, SOM(**kwargs).fit(X), SOM(precision="float16", **kwargs).fit(X)
+
+
+def assert_float16_fit(X, ref, som):
+    # an equally good map, not the same one; labels_ and the error measures from float32 searches
+    assert som.quantization_error(X) == pytest.approx(ref.quantization_error(X), rel=0.02)
+    assert abs(som.topographic_error(X) - ref.topographic_error(X)) < 0.02
+    np.testing.assert_array_equal(som.labels_, som.predict(X))  # predict searches in float32
+
+
+def test_metal_float16(metal_som):
+    X, ref, som = float16_case("mps")
+    assert som._kernel(20, half=True) == "metal-float16"
+    assert som._kernel(15, half=True) == "metal"  # fewer features stay in float32, as does manhattan
+    assert_float16_fit(X, ref, som)
 
 
 def test_metal_ties_and_offsets(metal_som):
