@@ -369,14 +369,14 @@ class SOM:
             sums, counts = torch.zeros_like(weights), torch.zeros(n_nodes, dtype=torch.long, device=weights.device)
             for batch in data.split(batch_size):
                 bmus = self._scores(batch, weights).argmin(1)
-                keep = self._has_bmu(batch)  # samples without a BMU do not contribute
-                if keep is not None:
-                    batch, bmus = batch[keep], bmus[keep]
+                keep = self._has_bmu(batch)
+                if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count them)
+                    batch = batch * keep[:, None]
                 if deterministic:  # a matrix product sums in a fixed order, unlike index_add_'s atomic additions
                     sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
                 else:
                     sums.index_add_(0, bmus, batch)
-                counts.index_add_(0, bmus, torch.ones_like(bmus))
+                counts.index_add_(0, bmus, torch.ones_like(bmus) if keep is None else keep.long())
             smoothed = self._smooth(torch.cat([sums, counts[:, None].float()], 1), sigma)
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
             weights = torch.where(denominator > 0, numerator / denominator, weights)
