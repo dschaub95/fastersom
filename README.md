@@ -76,14 +76,18 @@ so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for
 The spatiomic tutorial's 480,000 x 34 pixels, and 5,000,000 x 60 synthetic samples for the 200 x 200 map; 10 epochs,
 mean of 3 seeds (one fit on the CPU at 200 x 200); 16 CPU threads; peak GPU memory includes the data.
 `uv run benchmarks/memory.py` downloads and preprocesses the tutorial data, installs XPySom and torchsom into temporary
-environments and prints one JSON line per row; `--library`, `--device` and `--size` run a part of it
+environments and prints one JSON line per row, on CUDA for fastersom with and without the fused kernels, with
+the first fit's time in `first_fit_s`; `--library`, `--device` and `--size` run a part of it
 ([`benchmarks/memory.py`](https://github.com/dschaub95/fastersom/blob/main/benchmarks/memory.py)).
 
 | implementation                                       | map       | hardware       | batch size          | fit time | peak GPU memory | quantization error |
 | ---------------------------------------------------- | --------- | -------------- | ------------------- | -------- | --------------- | ------------------ |
-| fastersom                                            | 30 x 30   | NVIDIA A100    | default (480,000)   | 0.048 s  | 234 MiB         | 0.168              |
+| fastersom                                            | 30 x 30   | NVIDIA A100    | default (480,000)   | 0.046 s  | 234 MiB         | 0.168              |
+| fastersom, `fused=False`                             | 30 x 30   | NVIDIA A100    | default (298,261)   | 0.11 s   | 1150 MiB        | 0.168              |
 | fastersom                                            | 30 x 30   | NVIDIA A100    | 32,768              | 0.052 s  | 90 MiB          | 0.168              |
+| fastersom, `fused=False`                             | 30 x 30   | NVIDIA A100    | 32,768              | 0.10 s   | 204 MiB         | 0.168              |
 | fastersom                                            | 30 x 30   | NVIDIA A100    | 8,096               | 0.13 s   | 90 MiB          | 0.168              |
+| fastersom, `fused=False`                             | 30 x 30   | NVIDIA A100    | 8,096               | 0.13 s   | 118 MiB         | 0.168              |
 | [XPySom](https://github.com/Manciukic/xpysom) (CuPy) | 30 x 30   | NVIDIA A100    | 8,096               | 0.46 s   | 313 MiB         | 0.169              |
 | XPySom (CuPy)                                        | 30 x 30   | NVIDIA A100    | 65,536              | 0.41 s   | 2088 MiB        | 0.169              |
 | [torchsom](https://github.com/michelin/TorchSOM)     | 30 x 30   | NVIDIA A100    | 1,024               | 22.2 s   | 44 MiB          | 0.175              |
@@ -91,11 +95,15 @@ environments and prints one JSON line per row; `--library`, `--device` and `--si
 | XPySom (NumPy)                                       | 30 x 30   | 16 CPU threads | 8,096               | 25.6 s   | -               | 0.168              |
 | torchsom                                             | 30 x 30   | 16 CPU threads | 1,024               | 36.2 s   | -               | 0.176              |
 | fastersom                                            | 100 x 100 | NVIDIA A100    | default (480,000)   | 0.18 s   | 298 MiB         | 0.162              |
+| fastersom, `fused=False`                             | 100 x 100 | NVIDIA A100    | default (26,843)    | 0.51 s   | 2138 MiB        | 0.162              |
 | fastersom                                            | 100 x 100 | NVIDIA A100    | 8,096               | 0.21 s   | 110 MiB         | 0.162              |
+| fastersom, `fused=False`                             | 100 x 100 | NVIDIA A100    | 8,096               | 0.52 s   | 400 MiB         | 0.162              |
 | XPySom (CuPy)                                        | 100 x 100 | NVIDIA A100    | 8,096               | 2.8 s    | 2846 MiB        | 0.162              |
 | fastersom                                            | 100 x 100 | 16 CPU threads | default (8,192)     | 62.4 s   | -               | 0.162              |
 | fastersom                                            | 200 x 200 | NVIDIA A100    | default (1,118,481) | 11.8 s   | 2244 MiB        | 0.380              |
-| fastersom                                            | 200 x 200 | NVIDIA A100    | 8,096               | 12.4 s   | 1346 MiB        | 0.380              |
+| fastersom, `fused=False`                             | 200 x 200 | NVIDIA A100    | default (6,710)     | 29.4 s   | 3294 MiB        | 0.380              |
+| fastersom                                            | 200 x 200 | NVIDIA A100    | 8,096               | 12.3 s   | 1346 MiB        | 0.380              |
+| fastersom, `fused=False`                             | 200 x 200 | NVIDIA A100    | 8,096               | 28.7 s   | 3718 MiB        | 0.380              |
 | XPySom (CuPy)                                        | 200 x 200 | NVIDIA A100    | 8,096               | 118.8 s  | 12292 MiB       | 0.380              |
 | fastersom                                            | 200 x 200 | 16 CPU threads | default (8,192)     | 43 min   | -               | 0.380              |
 
@@ -103,8 +111,10 @@ With less GPU memory fastersom is about 10x faster than XPySom on a 30 x 30 map,
 (with a tenth of the memory) and 10x faster on a 200 x 200 map (with a ninth of the memory), and 14x faster on the CPU.
 torchsom updates the map per mini-batch, so it needs small batches and is far slower.
 
-[`benchmarks/fused.py`](https://github.com/dschaub95/fastersom/blob/main/benchmarks/fused.py) compares fit time and
-peak memory on CUDA over map sizes, feature counts, metrics and `deterministic` between versions.
+The fused CUDA kernels make fastersom 2-3x faster than its torch path (`fused=False`) with a seventh to two thirds of
+the memory, except at small batches on small maps. Fit times exclude the first fit in a process, which compiles and
+checks the kernels: with an empty Triton cache it takes 2.4-2.9 s longer than with `fused=False` (30 x 30: 3.0 s
+instead of 0.6 s), and with the kernels cached on disk by an earlier run 0.6 s longer.
 
 ## Algorithm
 
