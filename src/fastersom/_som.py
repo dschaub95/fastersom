@@ -194,6 +194,8 @@ class SOM:
             on MPS they take a matrix product with a one-hot nodes x batch matrix, which makes fit 1.2-1.8x slower.
             Also used when ``torch.use_deterministic_algorithms(True)`` is set. The CPU is always deterministic. Maps
             from different devices still differ by float rounding.
+        fused: Whether the BMU search on CUDA may use the fused kernels. With False, it never compiles or launches
+            them and takes the torch path, as on other devices.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -216,6 +218,7 @@ class SOM:
         memory_fraction: float | None = None,
         verbose: bool = False,
         deterministic: bool = False,
+        fused: bool = True,
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -230,6 +233,7 @@ class SOM:
         self.memory_fraction = memory_fraction
         self.verbose = verbose
         self.deterministic = deterministic
+        self.fused = fused
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -252,6 +256,7 @@ class SOM:
         state.setdefault("memory_fraction", None)  # pickled before 0.3
         state.setdefault("verbose", False)  # pickled before 0.3.2
         state.setdefault("deterministic", False)  # pickled before 0.3.2
+        state.setdefault("fused", True)  # pickled by 0.3.2 and before
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -307,7 +312,7 @@ class SOM:
         tensor-core kernel searches dot-product scores on the GPUs of _FAST_TF32, for over 64 nodes (a tile of 128 is
         half empty otherwise) and n_nodes x n_features >= 8192 (below, the float32 kernel is as fast or faster on an
         A100); a kernel that fails its self-check leaves the next one."""
-        if _triton(self._device) is None:
+        if not self.fused or _triton(self._device) is None:
             return None
         n_nodes, manhattan = self.n_rows * self.n_cols, self.metric == "manhattan"
         kernels = []

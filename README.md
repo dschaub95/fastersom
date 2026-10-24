@@ -65,7 +65,8 @@ torch path's only on near-ties. Only the A100 has been tested; GPUs that report 
 as the H20, are likely slower on tensor cores. The first use of a feature count compiles its kernel (2-4 s, then
 cached on disk by Triton), which needs a C compiler and the Python headers (e.g. `python3-dev`, or a uv-managed
 Python), and checks it on a tiny search. If either fails, fastersom warns and falls back from the tensor-core kernel
-to the float32 kernel and from that to the torch path, which ROCm, MPS and the CPU always use.
+to the float32 kernel and from that to the torch path, which ROCm, MPS and the CPU always use. `fused=False` takes
+the torch path on CUDA too, without compiling.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.

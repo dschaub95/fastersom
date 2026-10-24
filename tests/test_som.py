@@ -326,7 +326,7 @@ def test_pickle_round_trip(data, monkeypatch):
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[0], labels)
     np.testing.assert_array_equal(loaded.predict(data, return_distance=True)[1], distances)
     state = som.__getstate__()
-    del state["memory_fraction"], state["verbose"], state["deterministic"]  # as pickled by 0.2
+    del state["memory_fraction"], state["verbose"], state["deterministic"], state["fused"]  # as pickled by 0.2
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
     np.testing.assert_array_equal(loaded.predict(data), labels)
@@ -413,16 +413,12 @@ def fused():
     return _som
 
 
-def torch_path(monkeypatch):
-    monkeypatch.setattr(SOM, "_kernel", lambda self, n_features, top2=False: None)
-
-
 @pytest.mark.parametrize("metric", METRICS)
 @pytest.mark.parametrize(
     ("n_samples", "n_features", "n_rows", "n_cols"),
     [(5000, 6, 7, 9), (3001, 34, 30, 30), (1500, 196, 9, 9), (500, 160, 3, 3)],
 )
-def test_fused_matches_torch(fused, monkeypatch, metric, n_samples, n_features, n_rows, n_cols):
+def test_fused_matches_torch(fused, metric, n_samples, n_features, n_rows, n_cols):
     # sizes off the tiles. Float32 kernel: 6 features without its loop over 16, 34 and 196 with a remainder, 160 without
     # (manhattan only, as 9 nodes stay off tensor cores); tensor cores (on GPUs with fast TF32): 34 and 196 features
     rng = np.random.default_rng(0)
@@ -437,7 +433,7 @@ def test_fused_matches_torch(fused, monkeypatch, metric, n_samples, n_features, 
         assert som._kernel(n_features) == ("float32" if metric == "manhattan" or n_features <= 128 else None)
     labels, distances = som.predict(X, return_distance=True)
     top2 = som._search(som._weights, som._kernel(n_features, top2=True), top2=True)(torch.as_tensor(X, device="cuda"))
-    torch_path(monkeypatch)
+    som.fused = False
     ref_labels, ref_distances = som.predict(X, return_distance=True)
     # float32 sums in another order may flip near-ties only
     assert (labels == ref_labels).mean() > 0.999
@@ -485,6 +481,19 @@ def fresh(fused, monkeypatch):
     monkeypatch.undo()
     fused._triton.cache_clear()
     fused._works.cache_clear()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_fused_off_never_compiles(data, monkeypatch):
+    from fastersom import _som
+
+    def fail(device):
+        raise AssertionError("compiled")
+
+    monkeypatch.setattr(_som, "_triton", fail)
+    som = SOM(6, 6, n_epochs=1, metric="manhattan", device="cuda", fused=False).fit(data)
+    som.predict(data)
+    som.topographic_error(data)
 
 
 def test_fused_compile_failure_falls_back(data, fresh, monkeypatch):
