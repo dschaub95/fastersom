@@ -59,8 +59,9 @@ Options:
 - `verbose=True` shows a progress bar over the epochs of `fit`, with an estimate of the remaining time.
 - `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, whose atomic additions otherwise
   vary in order. On CUDA it sums the samples per node as 64-bit fixed-point integers (on an A100 up to 2x slower on
-  small maps, 3-10% from 100 x 100 nodes), on MPS with a matrix product (on an M3 Max 3.4-4.3x slower than without
-  from 30 x 30 to 100 x 100 nodes, as the fused search is so much faster). It is also used under
+  small maps, 3-10% from 100 x 100 nodes), on MPS likewise with the [Metal kernels](#fused-metal-kernels) (on an M3
+  Max 1.4x slower at 10 x 10 nodes, 1.14x at 30 x 30, the same from 100 x 100) and else with a matrix product (1.2-1.8x
+  slower). It is also used under
   `torch.use_deterministic_algorithms(True)`. The CPU is always deterministic; maps from different devices still differ
   by float rounding.
 - `fused=False` turns off the fused [CUDA](#fused-cuda-kernels) and [Metal](#fused-metal-kernels) kernels of the BMU

@@ -382,12 +382,12 @@ def test_deterministic(device, monkeypatch):
         torch.use_deterministic_algorithms(previous)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_deterministic_keeps_small_values():
+@pytest.mark.parametrize("device", GPUS)
+def test_deterministic_keeps_small_values(device):
     # fixed point scaled for the 1e16 would round every 1 to 0; node 0 holds only the 1s
     X = np.ones((1024, 1), np.float32)
     X[-1] = 1e16
-    som = SOM(1, 2, n_epochs=1, sigma_initial=0.1, init=[[1], [1e16]], device="cuda", deterministic=True).fit(X)
+    som = SOM(1, 2, n_epochs=1, sigma_initial=0.1, init=[[1], [1e16]], device=device, deterministic=True).fit(X)
     assert som.weights_[0, 0] == pytest.approx(1)
 
 
@@ -525,16 +525,6 @@ def test_fused_ties_and_offsets(fused):
 
 def test_metal_ties_and_offsets(metal_som):
     assert_ties_and_offsets("mps")
-
-
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")
-def test_metal_deterministic_bounds_one_hot(data):
-    # deterministic sums on MPS take a one-hot nodes x batch matrix, which must fit in memory_fraction (0.5) of the
-    # memory torch recommends, also with the fused kernels' larger batches (2^26 / 6 samples would take 447 GB)
-    som = SOM(100, 100, device="mps")
-    som._setup()
-    batch = som._batch_size_for(torch.as_tensor(data), "metal", one_hot=True)
-    assert batch * 10_000 * 4 <= 0.5 * torch.mps.recommended_max_memory()
 
 
 def test_metal_manhattan_up_to_512_features(metal_som):

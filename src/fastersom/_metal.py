@@ -277,6 +277,40 @@ kernel void bmu_staged(
 BMU_STAGED("bmu_staged", false)
 BMU_STAGED("bmu_staged_top2", true)
 
+// adds value to the 64-bit integer at word (its low word first) by two 32-bit atomic additions, as Apple GPUs have no
+// 64-bit one: the low word's returns its old value, from which follows the carry into the high word, so that the sum
+// is exact (mod 2^64) in any order
+inline void add64(device atomic_uint* word, long value) {
+    uint low = uint(ulong(value)), high = uint(ulong(value) >> 32);
+    uint old = atomic_fetch_add_explicit(word, low, memory_order_relaxed);
+    high += old + low < old;
+    if (high) atomic_fetch_add_explicit(word + 1, high, memory_order_relaxed);
+}
+
+// fit's deterministic sums: adds each sample's features to its BMU's as fixed point, x * 2^shift (exact) rounded to an
+// integer into sums and the remainder times 2^low_shift, rounded, into lows, int64 per node and feature, so that the
+// sums do not depend on the order of the additions. A thread per sample and feature; zeros add nothing, and the
+// remainder is 0 for all but the smallest values. p: samples, x's row stride, low_shift
+kernel void fixed_sums(
+    device const float* x [[buffer(0)]],
+    device const long* bmus [[buffer(1)]],
+    device const int* shift [[buffer(2)]],
+    device atomic_uint* sums [[buffer(3)]],
+    device atomic_uint* lows [[buffer(4)]],
+    constant long* p [[buffer(5)]],
+    uint i [[thread_position_in_grid]])
+{
+    const long n = p[0], ld = p[1], s = i / D;
+    const int k = i % D;
+    if (s >= n) return;
+    float v = x[s * ld + k];
+    if (v == 0.0f) return;
+    float scaled = ldexp(v, shift[k]), high = rint(scaled), rest = scaled - high;  // both exact
+    long word = 2 * (bmus[s] * D + k);
+    add64(sums + word, long(high));
+    if (rest != 0.0f) add64(lows + word, long(rint(ldexp(rest, int(p[2])))));
+}
+
 #if L1
 // the node j of least ||x - w_j||_1 per sample x. w holds the nodes in blocks of L1_BN as (block, D, L1_BN); padded
 // nodes are infinite. p as for bmu_dot
@@ -538,6 +572,19 @@ def search(
         return _bmus(_rows(x), len(x), kernel, args, _DOT_SG * 8, _DOT_SG * 32, n_blocks, top2, parts)
 
     return _in_parts(find, _MAX_THREADS // (_DOT_SG * 32) * _DOT_SG * 8)
+
+
+def fixed_sums(
+    x: torch.Tensor, bmus: torch.Tensor, shift: torch.Tensor, low_shift: int, sums: torch.Tensor, lows: torch.Tensor
+) -> None:
+    """Adds the samples x (n, n_features) to the fixed-point sums of their BMUs bmus (int64), in place: x * 2^shift
+    (int32 per feature) rounded to sums, the remainders times 2^low_shift rounded to lows, both int64 (nodes,
+    n_features); see the kernel."""
+    library, x = _library(x.shape[1]), _rows(x)
+    rows = _MAX_THREADS // x.shape[1]
+    for part, part_bmus in zip(x.split(rows), bmus.split(rows), strict=True):
+        params = [len(part), part.stride(0), low_shift]
+        library.fixed_sums(part, part_bmus, shift, sums, lows, params, threads=part.numel(), group_size=256)
 
 
 def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, top2: bool) -> None:

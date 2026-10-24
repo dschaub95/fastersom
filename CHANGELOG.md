@@ -10,16 +10,18 @@
   500 x 500 nodes, and 60-260x under manhattan. On an M3 Max (30-core GPU), with synthetic samples of the benchmark
   data's shape (480,000 x 34; the tutorial data was not used), `fit` takes 0.059 s instead of 0.32 s at 30 x 30 nodes
   and 0.52 s instead of 2.15 s at 100 x 100 under euclidean (cosine 3.9x at both), 0.10 s instead of about 34 s under
-  manhattan at 30 x 30, and 0.20 s instead of 0.47 s with `deterministic=True`; at 300 x 300 nodes with 300,000
+  manhattan at 30 x 30, and 0.066 s instead of 0.47 s with `deterministic=True`; at 300 x 300 nodes with 300,000
   samples 3.1 s instead of 23 s. The kernels compile from source at runtime with `torch.mps.compile_shader` (about
   0.2 s per feature count) and pass a similar exact self-check, or warn and leave the torch path; `fused=False` keeps
   the torch path.
 - On MPS, manhattan distances on the torch path (`fused=False`) and the distances of `transform` add up one feature
   at a time instead of with `cdist`, which there holds batch x nodes x features floats several times over: the default
   batch could ask for over 36 GB (26,843 samples at 100 x 100 nodes and 34 features) and freeze the machine. They now
-  take two batch x nodes matrices, at 1.5x the time of `cdist`. Under `deterministic=True`, the default batch on MPS
-  counts the one-hot nodes x batch matrix of the sums, which the fused kernels' larger batches would otherwise blow
-  up.
+  take two batch x nodes matrices, at 1.5x the time of `cdist`.
+- On MPS with the fused kernels, `deterministic=True` adds the samples per node as 64-bit fixed-point integers, like
+  CUDA, by pairs of 32-bit atomic additions with the carry (Apple GPUs have no 64-bit atomic addition), instead of with
+  a one-hot matrix product: on an M3 Max 1.4x slower than without at 10 x 10 nodes, 1.14x at 30 x 30 and no slower from
+  100 x 100 (300 x 300: 3.0 s), instead of 3.4-4.3x. Zeros, such as clipped pixels, add nothing.
 - On MPS, `fit` counts the samples per node in int32, as torch 2.8's `index_add_` there takes no int64 source and
   raised.
 
