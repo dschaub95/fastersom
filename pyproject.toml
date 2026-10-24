@@ -44,6 +44,11 @@ dev = [
     "twine>=7.0.0",
 ]
 
+[tool.uv]
+# uv's own Python ships the headers that Triton needs to compile the fused CUDA kernels; without them tests and
+# benchmarks fall back to the torch path and the fused-kernel tests skip
+python-preference = "only-managed"
+
 [tool.pytest]
 minversion = "9.0"
 testpaths = ["tests"]
