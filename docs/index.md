@@ -20,6 +20,13 @@ scikit-learn: `fit`, `predict`, `transform` and fitted attributes ending in `_`.
 Devices and fused kernels, batch size and memory, reproducibility and precision, distances, map size and epochs.
 :::
 
+:::{grid-item-card} Tutorials {octicon}`play;1em;`
+:link: tutorials/index
+:link-type: doc
+
+Clustering mass cytometry like FlowSOM, and pixel clustering of multiplexed images, with AnnData and scanpy.
+:::
+
 :::{grid-item-card} API reference {octicon}`code;1em;`
 :link: api
 :link-type: doc
@@ -95,6 +102,7 @@ exponential decay are supported.
 :maxdepth: 2
 
 guide/index
+tutorials/index
 api
 changelog
 contributing

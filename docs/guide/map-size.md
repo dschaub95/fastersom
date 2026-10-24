@@ -13,7 +13,7 @@ What the nodes are used for decides how many are needed:
 - **Nodes as an intermediate clustering.** FlowSOM {cite:p}`Van_Gassen_2015` clusters cells into a 10 x 10 grid by
   default and then groups the 100 nodes into metaclusters, typically more than the number of expected populations.
   Pixel clustering of multiplexed images often uses larger maps, such as 30 x 30 or more, followed by graph clustering
-  (for example Leiden {cite:p}`Traag_2019`) of the nodes.
+  (for example Leiden {cite:p}`Traag_2019`) of the nodes. Both are shown in the [tutorials](../tutorials/index.md).
 - **Nodes as a summary or visualisation of the data.** The SOM Toolbox {cite:p}`Vesanto_2000` chooses about
   $5 n^{0.54}$ nodes for $n$ samples by default, with the ratio of the grid's sides set from the two largest
   principal components of the data.
