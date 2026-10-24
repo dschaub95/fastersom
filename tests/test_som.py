@@ -496,6 +496,20 @@ def test_fused_off_never_compiles(data, monkeypatch):
     som.topographic_error(data)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_fused_skips_old_gpus(data, monkeypatch):
+    # below compute capability 7.0, which Triton does not support, the torch path runs without compiling or warning
+    from fastersom import _som
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (6, 0))
+    _som._triton.cache_clear()
+    try:
+        assert _som._triton(torch.device("cuda")) is None
+        SOM(6, 6, n_epochs=1, device="cuda").fit(data)
+    finally:
+        _som._triton.cache_clear()
+
+
 def test_fused_compile_failure_falls_back(data, fresh, monkeypatch):
     som = SOM.from_weights(data[:36], 6, 6, device="cuda")
     expected = som.predict(data)

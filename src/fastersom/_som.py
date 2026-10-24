@@ -69,9 +69,10 @@ def _warn(error: Exception, message: str) -> None:
 @cache
 def _triton(device: torch.device) -> ModuleType | None:
     """fastersom._kernels if Triton compiles kernels for the device, else None: not on ROCm (whose 64-thread warps the
-    tiling lacks), without Triton with Gluon (Triton >= 3.5), and after a warning without a C compiler or the Python
-    headers, which Triton needs for its launchers."""
-    if device.type != "cuda" or torch.version.hip is not None:
+    tiling lacks), not below compute capability 7.0 (which Triton does not support, like torch.compile; on a Pascal
+    GP100 its PTX codegen fails), without Triton with Gluon (Triton >= 3.5), and after a warning without a C compiler or
+    the Python headers, which Triton needs for its launchers."""
+    if device.type != "cuda" or torch.version.hip is not None or torch.cuda.get_device_capability(device) < (7, 0):
         return None
     try:
         from fastersom import _kernels

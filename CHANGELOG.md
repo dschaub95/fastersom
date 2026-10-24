@@ -20,8 +20,8 @@
 - The first use of a feature count compiles its kernel (2-4 s, then cached on disk by Triton), which needs a C
   compiler and the Python headers, and checks it on a tiny search with exactly known scores. If compiling or the check
   fails, fastersom warns and falls back one step: from the tensor-core kernel to the float32 kernel, and from that to
-  the torch path. ROCm, MPS and the CPU use the torch path, and with the new parameter `fused=False` also CUDA, which
-  then compiles nothing.
+  the torch path. ROCm, GPUs below compute capability 7.0 (which Triton does not support), MPS and the CPU use the
+  torch path, and with the new parameter `fused=False` also CUDA, which then compiles nothing.
 - `predict(return_distance=True)` and `quantization_error` compute each distance from the BMU's weights for every
   metric, as they did for euclidean, rather than from the search's scores, so that the distances do not depend on which
   kernel found the BMU (same values up to float32 rounding).
