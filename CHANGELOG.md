@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-24)
 
 - On CUDA with Triton >= 3.5 (in torch's Linux wheels from torch 2.9), the BMU search of `fit`, `predict`,
   `quantization_error` and `topographic_error` runs in fused kernels that keep only each sample's best node (or best
