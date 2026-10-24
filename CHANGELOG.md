@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (unreleased)
 
 - On MPS (Apple GPUs, torch >= 2.6; tested with 2.8 and 2.14), the BMU search runs in fused Metal kernels, which keep
   only each sample's best node (or best two) in float32: on the simdgroup matrix units under euclidean, cosine and
