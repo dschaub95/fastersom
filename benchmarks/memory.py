@@ -147,7 +147,7 @@ def run(library: str, device: str, batch_size: int | None, size: int, fused: boo
         pool = cupy.get_default_memory_pool()
     times, mps_peak = [], 0
     # the first of several runs warms up; a single fit uses the last seed, whose map the other rows report
-    seeds = SEEDS[-1:] if size == 200 and not cuda else [SEEDS[0], *SEEDS]
+    seeds = SEEDS[-1:] if size == 200 and device == "cpu" else [SEEDS[0], *SEEDS]
     for seed in seeds:
         if pool:
             pool.free_all_blocks()

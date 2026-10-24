@@ -472,10 +472,11 @@ def _power_of_2(exponent: torch.Tensor) -> torch.Tensor:
 
 
 def _exponent(magnitude: torch.Tensor) -> torch.Tensor:
-    """An integer e per element with magnitude < 2^e (magnitudes clamped to HALF_RANGE), on the device, as frexp is
-    not on MPS; log2's rounding can only raise it by 1."""
-    low, high = HALF_RANGE
-    return torch.floor(torch.log2(magnitude.float().clamp(low, high))) + 1
+    """An integer e per element with magnitude < 2^e, on the device, as frexp is not on MPS; log2's rounding can only
+    raise it by 1. Magnitudes are clamped to HALF_RANGE's low end and 2^34, beyond the largest the scales see (nodes
+    -2 (w - c) of samples within 2^30 reach 2^32), so that every scaled value stays below 2^8 (2^8 after rounding to
+    half); the products of half inputs are exact in float32 (on an M3 Max 256 x 256 and 512 x 256 come out exactly)."""
+    return torch.floor(torch.log2(magnitude.float().clamp(HALF_RANGE[0], 2.0**34))) + 1
 
 
 def half_scales(nodes: torch.Tensor, bound: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -672,8 +673,7 @@ def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, to
     the samples have an integer centre. Its values are -1, 0 or 1, for dot products times 2^-3 to 2^3 by feature (the
     nodes divided by it), which the half variants must undo, exact also in half and scaled by powers of 2, so that every
     product is -1, 0 or 1 and every sum an integer below 2^24, exact in float32 in any order, also in the reference on
-    the CPU. Each
-    node is there twice, in different parts of the nodes, so that ties must go to the first."""
+    the CPU. Each node is there twice, in different parts of the nodes, so that ties must go to the first."""
     generator = torch.Generator().manual_seed(0)
     # an explicit generator and dtype keep it on the CPU in float32, which torch.set_default_device or
     # set_default_dtype would change otherwise

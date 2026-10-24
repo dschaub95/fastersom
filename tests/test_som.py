@@ -524,10 +524,9 @@ def test_fused_ties_and_offsets(fused):
     assert_ties_and_offsets("cuda")
 
 
-def float16_case(device, monkeypatch, module, keyword):
-    """Pixel-like data of 20 features, 0-1 scaled with clusters, and a float32 and a float16 fit of a 24 x 24 map (over
-    8192 node features, so that CUDA's tensor-core kernels take it), and how many of the float16 fit's searches had
-    keyword, which turns half on in module's search."""
+def float16_case(device, monkeypatch, module):
+    """Pixel-like data of 20 features, 0-1 scaled with clusters, a float32 and a float16 fit of a 24 x 24 map, and
+    which of the float16 fit's searches (by module.search) were in half."""
     rng = np.random.default_rng(0)
     centres = rng.random((12, 20))
     X = np.clip(centres[rng.integers(12, size=20_000)] + rng.normal(scale=0.05, size=(20_000, 20)), 0, 1)
@@ -538,7 +537,7 @@ def float16_case(device, monkeypatch, module, keyword):
 
     def spy(nodes, *args, **kw):
         if len(nodes) == 24 * 24:  # not the self-checks' searches
-            halves.append(kw.get(keyword) is not None and kw.get(keyword) is not False)
+            halves.append(kw.get("bound") is not None)
         return search(nodes, *args, **kw)
 
     monkeypatch.setattr(module, "search", spy)
@@ -556,7 +555,7 @@ def assert_float16_fit(X, ref, som, halves):
 
 
 def test_metal_float16(metal_som, monkeypatch):
-    assert_float16_fit(*float16_case("mps", monkeypatch, metal_som._metal(torch.device("mps")), "bound"))
+    assert_float16_fit(*float16_case("mps", monkeypatch, metal_som._metal(torch.device("mps"))))
     som = SOM(24, 24, metric="manhattan", device="mps")
     som._setup()
     assert som._kernel(20, half=True) == "metal"  # as with fewer than 16 features

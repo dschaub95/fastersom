@@ -55,12 +55,12 @@ _PRECISIONS = ("float32", "float16")
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
 _HALF_MIN_FEATURES = 16
 _METAL = ("metal", "metal-float16")
-# what a failed kernel leaves, and how the warnings name the kernels
-_FALLBACKS = {
-    "tensor-core": "the float32 kernel or the torch path",
-    "metal-float16": "the float32 Metal kernel or the torch path",
+# how a failure's warning names the kernel, and what the kernel leaves
+_WARNINGS = {
+    "tensor-core": ("tensor-core", "the float32 kernel or the torch path"),
+    "metal": ("Metal", "the torch path"),
+    "metal-float16": ("Metal float16", "the float32 Metal kernel or the torch path"),
 }
-_NAMES = {"metal": "Metal", "metal-float16": "Metal float16"}
 
 
 def _warn(error: Exception, message: str) -> None:
@@ -139,7 +139,7 @@ def _works(device: torch.device, kernel: str, n_features: int, metric: str, top2
         if _out_of_memory(error):
             raise
         _FAILED.add((device, kernel))
-        name, fallback = _NAMES.get(kernel, kernel), _FALLBACKS.get(kernel, "the torch path")
+        name, fallback = _WARNINGS.get(kernel, (kernel, "the torch path"))
         failed = f"{name} BMU kernel failed " + ("to compile or its" if kernel in _METAL else "its")
         _warn(error, f"fastersom's {failed} self-check ({{}}), using {fallback}")
         return False
@@ -257,7 +257,7 @@ class SOM:
             1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
             node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
             same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
-            is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs should gain more,
+            is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs may gain more,
             which is untested.
 
     Attributes:
@@ -609,7 +609,7 @@ class SOM:
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
         magnitude, half = None, self.precision == "float16"
-        if deterministic or half:
+        if deterministic or (half and _metal(self._device) is not None):  # the Metal half kernels' scales need it
             magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
         if half and _metal(self._device) is not None:
             # the nodes stay among the samples and the initial weights, so these bound all that the half kernels scale
@@ -631,8 +631,8 @@ class SOM:
             _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
             if mps:  # the shifts, and 2^exponent as two float32 factors, which MPS's lack of float64 calls for
                 shift = (low_shift - exponent).int().to(self._device)
-                half = exponent // 2
-                factors = [torch.ldexp(torch.ones(len(half)), e).to(self._device) for e in (half, exponent - half)]
+                split = exponent // 2
+                factors = [torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split)]
             else:
                 scale = data.new_ones(data.shape[1], dtype=torch.float64).ldexp_(low_shift - exponent)
                 fixed_rows = max(1, (1 << 21) // data.shape[1])
