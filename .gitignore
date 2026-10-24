@@ -15,3 +15,8 @@ htmlcov/
 
 # Benchmark data
 benchmarks/data/
+
+# Docs
+docs/_build/
+docs/generated/
+docs/tutorials/data/
