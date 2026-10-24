@@ -3,14 +3,16 @@
 Runs on the spatiomic tutorial's preprocessed subsample (480,000 x 34 pixels), which the first run downloads and
 prepares (see ``data.py``), and on 5,000,000 x 60 synthetic samples for a large 200 x 200 map. Every configuration runs
 in its own process limited to ``--cpus`` cores (default 16), so the memory peaks do not mix, with XPySom, CuPy and
-torchsom installed into temporary environments on top of this project's. fastersom on CUDA runs with its fused
-kernels and with ``fused=False`` (the torch path):
+torchsom installed into temporary environments on top of this project's. fastersom on CUDA and MPS runs with its fused
+kernels and with ``fused=False`` (the torch path); Apple GPUs only with ``--device mps``, for fastersom:
 
-    uv run benchmarks/memory.py                                   # every configuration
+    uv run benchmarks/memory.py                                   # every configuration on CUDA and the CPU
     uv run benchmarks/memory.py --library fastersom --device cpu  # a part of them
+    uv run benchmarks/memory.py --device mps                      # fastersom on an Apple GPU
 
 Set ``CUPY`` to the CuPy wheel matching your CUDA version (default cupy-cuda12x==14.2.0). Peak memory includes the
-data on the GPU and the allocator cache (torch's reserved memory, CuPy's memory pool). XPySom runs with the parameters
+data on the GPU and the allocator cache (torch's reserved memory, CuPy's memory pool; on MPS, which keeps no peak, the
+largest the driver holds after a fit). XPySom runs with the parameters
 spatiomic's ``so.dimension.som`` passes it, and torchsom with spatiomic's neighbourhood schedule. fit_s is the mean
 over the seeds after a warm-up fit; first_fit_s is that warm-up, the first fit in a new process, with an empty Triton
 cache, so it includes compiling and checking fastersom's kernels (cached on disk after the first run).
@@ -53,6 +55,13 @@ CONFIGS = [
     ("fastersom", "cuda", 8096, 200),
     ("xpysom", "cuda", 8096, 200),
     ("fastersom", "cpu", None, 200),  # one fit without a warm-up, as it takes about 45 minutes
+    # Apple GPUs (--device mps); XPySom's GPU path needs CuPy, which has no MPS
+    ("fastersom", "mps", None, 30),
+    ("fastersom", "mps", 8096, 30),
+    ("fastersom", "mps", None, 100),
+    ("fastersom", "mps", 8096, 100),
+    ("fastersom", "mps", None, 200),  # the 5,000,000 x 60 samples take about 3.6 GB of memory while they are made
+    ("fastersom", "mps", 8096, 200),
 ]
 # packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
 PACKAGES = {"fastersom": [], "xpysom": ["xpysom==1.0.7"], "torchsom": ["torchsom==1.3.1"]}
@@ -111,18 +120,32 @@ def synthetic(n_samples: int = 5_000_000, n_features: int = 60, n_clusters: int 
     return np.clip(X, 0, 1, out=X)
 
 
+def hardware(device: str) -> str:
+    import torch
+
+    if device == "cuda":
+        return torch.cuda.get_device_name()
+    if device == "mps":  # the chip, e.g. Apple M3 Max, and its GPU cores
+        chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout
+        cores = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True).stdout
+        lines = [line for line in cores.splitlines() if "Total Number of Cores" in line]
+        n_cores = lines[0].split(":")[1].strip() if lines else "?"
+        return f"{chip.strip()} ({n_cores}-core GPU)"
+    return f"{torch.get_num_threads()} CPU threads"
+
+
 def run(library: str, device: str, batch_size: int | None, size: int, fused: bool, path: str) -> dict:
     import torch
 
     from fastersom import SOM
 
     X = synthetic() if size == 200 else np.load(path).astype(np.float32)
-    cuda, pool = device == "cuda", None
+    cuda, mps, pool = device == "cuda", device == "mps", None
     if cuda and library == "xpysom":
         import cupy
 
         pool = cupy.get_default_memory_pool()
-    times = []
+    times, mps_peak = [], 0
     # the first of several runs warms up; a single fit uses the last seed, whose map the other rows report
     seeds = SEEDS[-1:] if size == 200 and not cuda else [SEEDS[0], *SEEDS]
     for seed in seeds:
@@ -131,16 +154,21 @@ def run(library: str, device: str, batch_size: int | None, size: int, fused: boo
         if cuda:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
+        if mps:
+            torch.mps.empty_cache()
         start = time.perf_counter()
         weights = fit(library, device, batch_size, size, fused, X, seed)
         if pool:
             cupy.cuda.Device().synchronize()
         if cuda:
             torch.cuda.synchronize()
+        if mps:  # MPS keeps no peak; what the driver holds after the fit includes the allocator's cache of it
+            torch.mps.synchronize()
+            mps_peak = max(mps_peak, torch.mps.driver_allocated_memory())
         times.append(time.perf_counter() - start)
     if (
         library == "fastersom"
-        and cuda
+        and (cuda or mps)
         and fused
         and SOM.from_weights(weights, size, size, device=device)._kernel(X.shape[1]) is None
     ):
@@ -148,14 +176,16 @@ def run(library: str, device: str, batch_size: int | None, size: int, fused: boo
     peak = None
     if cuda:  # CuPy's pool keeps every block it allocated
         peak = round(((pool.total_bytes() if pool else 0) + torch.cuda.max_memory_reserved()) / 2**20)
+    elif mps:
+        peak = round(mps_peak / 2**20)
     error = SOM.from_weights(weights, size, size, device=device).quantization_error(X)
     return {
         "library": library,
         "device": device,
-        "hardware": torch.cuda.get_device_name() if cuda else f"{torch.get_num_threads()} CPU threads",
+        "hardware": hardware(device),
         "nodes": f"{size}x{size}",
         "batch_size": batch_size or "default",
-        "fused": fused if library == "fastersom" and cuda else None,
+        "fused": fused if library == "fastersom" and device != "cpu" else None,
         "fit_s": round(float(np.mean(times[1:] or times)), 3),
         "first_fit_s": round(times[0], 3),
         "fits": len(times[1:] or times),
@@ -177,12 +207,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data", type=Path, default=DATA, help="preprocessed subsample, prepared if missing")
     parser.add_argument("--library", nargs="+", choices=list(PACKAGES), default=list(PACKAGES))
-    parser.add_argument("--device", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
+    parser.add_argument("--device", nargs="+", choices=["cuda", "mps", "cpu"], default=["cuda", "cpu"])
     parser.add_argument("--size", nargs="+", type=int, choices=[30, 100, 200], default=[30, 100, 200])
     parser.add_argument("--cpus", type=int, default=16, help="CPU cores and threads per configuration")
     args = parser.parse_args()
     configs = [c for c in CONFIGS if c[0] in args.library and c[1] in args.device and c[3] in args.size]
-    configs = [(*c, fused) for c in configs for fused in ([True, False] if c[:2] == ("fastersom", "cuda") else [True])]
+    gpus = [("fastersom", "cuda"), ("fastersom", "mps")]
+    configs = [(*c, fused) for c in configs for fused in ([True, False] if c[:2] in gpus else [True])]
 
     # the child processes inherit the CPU affinity (Linux only) and the thread counts
     cpus = min(args.cpus, os.cpu_count())
