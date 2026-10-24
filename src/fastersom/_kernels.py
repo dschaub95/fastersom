@@ -306,6 +306,8 @@ def _bmus(
     tensor_cores: bool,
     top2: bool,
 ) -> torch.Tensor:
+    if n_samples == 0:  # e.g. none of the samples has a BMU, which leaves no programs to split the nodes over
+        return torch.empty((0, 2) if top2 else (0,), dtype=torch.long, device=x.device)
     block_m, block_n = (_TC_BLOCK, _TC_BLOCK) if tensor_cores else (BLOCK_M, BLOCK_N)
     # split the nodes into as few parts as give each streaming multiprocessor about 8 programs
     n_blocks, n_tiles = -(-n_samples // block_m), -(-n_nodes // block_n)
@@ -386,14 +388,16 @@ def check(device: torch.device, n_features: int, tensor_cores: bool, manhattan: 
     specialise on the counts, this compiles the very variant that the search then runs. The reference is on the CPU,
     as cuBLAS raises under torch.use_deterministic_algorithms without CUBLAS_WORKSPACE_CONFIG."""
     generator = torch.Generator().manual_seed(0)
-    x, nodes, offsets = torch.randint(-1, 2, (3, 256, n_features), generator=generator).double()
+    # an explicit device and dtype, which torch.set_default_device or set_default_dtype would change otherwise
+    x, nodes, offsets = torch.randint(-1, 2, (3, 256, n_features), generator=generator, device="cpu").double()
     if tensor_cores and n_features <= 2000:
-        small = torch.randint(-1, 2, (2, 256, n_features), generator=generator) * 2.0**-13
+        small = torch.randint(-1, 2, (2, 256, n_features), generator=generator, device="cpu") * 2.0**-13
         x[:, ::2] += small[0, :, ::2]
         nodes[:, 1::2] += small[1, :, 1::2]
     nodes[128:] = nodes[:128]
     scores = torch.cdist(x, nodes, p=1) if manhattan else x @ nodes.T + (offsets[:, 0] if bias else 0)
-    b, centre = (offsets[:, 0].float().to(device), torch.zeros(n_features, device=device)) if bias else (None, None)
+    b = offsets[:, 0].float().to(device) if bias else None
+    centre = None if b is None else b.new_zeros(n_features)
     found = search(nodes.float().to(device), b, centre, manhattan, tensor_cores, top2)(x.float().to(device)).cpu()
     if top2:
         best2 = scores.topk(2, 1, largest=False).values

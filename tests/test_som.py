@@ -464,6 +464,7 @@ def test_fused_ties_and_offsets(fused):
     labels, distances = som.predict(np.array([[0, 0, 1]], np.float32), return_distance=True)
     assert labels[0] == 0
     assert distances[0] == pytest.approx(0, abs=1e-6)
+    assert np.isnan(som.topographic_error(np.ones((10, 3), np.float32)))  # no sample has a BMU, so none is searched
 
 
 @pytest.fixture
@@ -494,6 +495,18 @@ def test_fused_compile_failure_falls_back(data, fresh, monkeypatch):
     # the batch size is chosen for the torch path, before any batch is searched
     assert som._batch_size_for(torch.as_tensor(data), som._kernel(6)) <= 2**28 // 36  # the fused one: 2^26 / 6
     np.testing.assert_array_equal(som.predict(data), expected)  # no second warning
+
+
+def test_fused_self_check_ignores_torch_defaults(fresh):
+    som = SOM.from_weights(np.eye(900, 34, dtype=np.float32), 30, 30, device="cuda")
+    expected = "tensor-core" if torch.cuda.get_device_capability() in fresh._FAST_TF32 else "float32"
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(torch.float64)
+    try:
+        assert som._kernel(34) == expected
+    finally:
+        torch.set_default_device(None)
+        torch.set_default_dtype(torch.float32)
 
 
 def test_fused_kernel_failure_degrades(data, fresh, monkeypatch):
