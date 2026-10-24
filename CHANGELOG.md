@@ -11,6 +11,9 @@
   and on 100 x 100 nodes cells of the gated populations below 1% of the cells land more often on nodes of their own
   (0.82 instead of 0.79). Maps up to 40 x 40 nodes (sigma_initial <= 10, e.g. FlowSOM's 10 x 10) are unchanged. Pass
   `sigma_final=0.1 * sigma_initial` for the old schedule.
+- Documentation on Read the Docs (https://fastersom.readthedocs.io): a user guide, two tutorials (clustering mass
+  cytometry like FlowSOM, and pixel clustering of multiplexed images) and the API reference, built with Sphinx in the
+  layout of the scverse cookiecutter template. `pip install fastersom[doc]` installs what the build needs.
 
 ## 0.5.0 (2026-10-24)
 
