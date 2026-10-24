@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+- On CUDA with Triton >= 3.5 (in torch's Linux wheels from torch 2.9), the BMU search of `fit`, `predict`,
+  `quantization_error` and `topographic_error` runs in fused kernels that keep only each sample's best node (or best
+  two) instead of writing the batch x nodes score matrix to GPU memory: a float32 Gluon kernel under manhattan, and
+  under the other metrics up to 128 features; and under euclidean, cosine and correlation on GPUs of compute capability
+  8.0, 9.0 and 10.0 (A100, H100, B200), for maps of over 64 nodes and nodes x features >= 8192, a tensor-core kernel at
+  any feature count, accurate to float32 by three TF32 products per product (3xTF32), summed in float32 per chunk of
+  up to 32 features. Other cases keep the torch path. On an A100 with the 480,000 x 34 benchmark data, `fit` under
+  euclidean is 2.3-3x faster than in 0.3.2 from 30 x 30 to 200 x 200 nodes (100 x 100: 0.17 s instead of 0.47 s;
+  cosine and correlation 1.4-3.2x), 5.3x with `deterministic=True` and 240x under manhattan, which used `cdist` (0.43 s
+  instead of 103 s); with 256 and 1024 features 1.3-1.7x. Peak GPU memory drops from 1114-2160 MiB to 234-556 MiB
+  (34 features, 30 x 30 to 200 x 200 nodes), as the default batch on CUDA becomes 2^26 / n_features samples. The
+  BMUs differ from the torch path's only on near-ties; in our tests the tensor-core kernel's were wrong against float64
+  for fewer samples than cuBLAS's (1,764 instead of 5,105 of 200,000 at 128 features and 200 x 200 nodes). Only the A100
+  has been tested; GPUs that report 9.0 with cut-down tensor cores, such as the H20, get the tensor-core kernel too,
+  which is likely slower there.
+- The first use of a feature count compiles its kernel (2-4 s, then cached on disk by Triton), which needs a C
+  compiler and the Python headers, and checks it on a tiny search with exactly known scores. If compiling or the check
+  fails, fastersom warns and falls back one step: from the tensor-core kernel to the float32 kernel, and from that to
+  the torch path. ROCm, GPUs below compute capability 7.0 (which Triton does not support), MPS and the CPU use the
+  torch path, and with the new parameter `fused=False` also CUDA, which then compiles nothing.
+- `predict(return_distance=True)` and `quantization_error` compute each distance from the BMU's weights for every
+  metric, as they did for euclidean, rather than from the search's scores, so that the distances do not depend on which
+  kernel found the BMU (same values up to float32 rounding).
+- On CUDA, `deterministic=True` adds the samples per node as 64-bit fixed-point integers, whose sum does not depend
+  on the order, instead of with a one-hot matrix product, in two words per value, which keep values down to about
+  n_samples^2 * 2^-124 of the feature's largest magnitude (smaller ones count as 0): on an A100 up to 2x slower than
+  without on 10 x 10 nodes and 3-10% from 100 x 100, instead of 2x. MPS keeps the matrix product.
+- Under cosine and correlation, `fit` adds the samples without a BMU as zeros instead of dropping them from each batch,
+  which waited for the GPU in every batch: 1.4-1.6x faster with small batches on an A100 (30 x 30 and 100 x 100 nodes,
+  `batch_size=8096`) and 1.15-1.25x on the CPU, with the same result.
+
 ## 0.3.2 (2026-10-23)
 
 - `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, by summing the samples per node
