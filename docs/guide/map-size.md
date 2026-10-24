@@ -39,9 +39,17 @@ with the number of nodes only on the torch path (see [](batch-size.md)).
 
 The neighbourhood width $\sigma$ decays exponentially from `sigma_initial` towards `sigma_final`, in grid units. The
 defaults are `sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2` (7.5 for a 30 x 30 map, 2.5 for 10 x 10) and
-`sigma_final = 0.1 * sigma_initial`, which reproduce XPySom's batch maps {cite:p}`Mancini_2020`. A large initial
-width orders the map globally in the first epochs; a small final width lets the nodes fit the data locally at the end.
-A larger `sigma_final` gives a smoother map with a higher quantization error.
+`sigma_final = min(0.1 * sigma_initial, 1)`. A large initial width orders the map globally in the first epochs; a small
+final width lets the nodes fit the data locally at the end.
+
+The final width trades the quantization error against the topographic error. A wider final neighbourhood gives a
+smoother, better ordered map (lower topographic error) with a higher quantization error; a narrower one fits the data
+more closely, but below about half a unit the grid starts to fold (topographic errors of 0.2 to 0.35). Capping the
+default at one unit keeps large maps from being smoothed beyond the resolution of their nodes: with
+`sigma_final = 0.1 * sigma_initial`, the schedule of XPySom {cite:p}`Mancini_2020`, a 100 x 100 map would end training
+with a neighbourhood 2.5 units wide and a quantization error 9-13% higher. Maps up to 40 x 40 nodes are not affected
+by the cap. To resolve rare populations on a large map, a final width of 0.5 to 1 units works well; pass
+`sigma_final=0.1 * sigma_initial` for XPySom's schedule.
 
 ## Epochs
 
