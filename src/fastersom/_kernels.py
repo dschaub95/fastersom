@@ -8,7 +8,8 @@ Gluon sets the tiling explicitly: 8 x 8 scores per thread take 16 loads per 64 m
 gives each thread a column of samples for one node, a load per multiply-add, at under half the speed.
 
 On GPUs whose TF32 tensor cores far outpace their float32 cores, dot-product scores instead come from _tc_kernel, a
-plain Triton kernel of the same structure on tensor cores, as 3xTF32 (three TF32 products per float32 product).
+plain Triton kernel of the same structure on tensor cores, as 3xTF32 (three TF32 products per float32 product), or under
+precision="float16" as a single TF32 product (1xTF32, inputs rounded to 11 significant bits, summed in float32).
 """
 
 from collections.abc import Callable
@@ -153,7 +154,7 @@ def _tf32_split(a):
 
 
 @triton.jit
-def _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half):
+def _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half, ONE: tl.constexpr):
     """Adds the products over a chunk of features: x . w = big . big + big . small + small . big up to the tiny
     small . small, each product of TF32 parts exact. Their sum over the chunk is added to the scores in float32, as the
     tensor cores truncate their sums to the precision of the running sum: summed over all features, the scores' errors
@@ -161,10 +162,14 @@ def _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half):
     float64's more often than the float32 kernel's."""
     x = x_rows + k[None, :]
     w = w_cols + k[:, None] * w_stride
-    x_big, x_small, w_big, w_small = tl.load(x), tl.load(x + x_half), tl.load(w), tl.load(w + w_half)
-    chunk = tl.dot(x_small, w_big, input_precision="tf32")
-    chunk = tl.dot(x_big, w_small, chunk, input_precision="tf32")
-    return scores + tl.dot(x_big, w_big, chunk, input_precision="tf32")
+    if ONE:  # 1xTF32: the float32 operands, which the tensor cores round to TF32
+        chunk = tl.dot(tl.load(x), tl.load(w), input_precision="tf32")
+    else:
+        x_big, x_small, w_big, w_small = tl.load(x), tl.load(x + x_half), tl.load(w), tl.load(w + w_half)
+        chunk = tl.dot(x_small, w_big, input_precision="tf32")
+        chunk = tl.dot(x_big, w_small, chunk, input_precision="tf32")
+        chunk = tl.dot(x_big, w_big, chunk, input_precision="tf32")
+    return scores + chunk
 
 
 @triton.jit(do_not_specialize=_COUNTS)
@@ -186,11 +191,13 @@ def _tc_kernel(
     LOOP_K: tl.constexpr,
     N16: tl.constexpr,
     N8: tl.constexpr,
+    ONE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     TOP2: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    """_bmu_kernel's search of x . w + bias on tensor cores, as 3xTF32 (see _tc_chunk), in tiles of 128 x 128."""
+    """_bmu_kernel's search of x . w + bias on tensor cores, as 3xTF32 (see _tc_chunk) or with ONE as 1xTF32, in
+    tiles of 128 x 128."""
     rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     x_rows = x_ptr + rows[:, None].to(tl.int64) * width
     best = tl.full([BLOCK], float("inf"), tl.float32)
@@ -205,13 +212,14 @@ def _tc_kernel(
         # in chunks of 16 and 8
         if LOOP:
             for i in tl.range(0, n_loop, num_stages=3):
-                scores = _tc_chunk(scores, x_rows, w_cols, i * LOOP_K + tl.arange(0, LOOP_K), w_stride, x_half, w_half)
+                k = i * LOOP_K + tl.arange(0, LOOP_K)
+                scores = _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half, ONE)
         for i in tl.static_range(N16):
             k = n_loop * LOOP_K + 16 * i + tl.arange(0, 16)
-            scores = _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half)
+            scores = _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half, ONE)
         if N8:
             k = n_loop * LOOP_K + 16 * N16 + tl.arange(0, 8)
-            scores = _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half)
+            scores = _tc_chunk(scores, x_rows, w_cols, k, w_stride, x_half, w_half, ONE)
         if HAS_BIAS:
             scores += tl.load(bias_ptr + cols)[None, :]
         best, best_node, second, second_node = _merge(
@@ -261,19 +269,23 @@ def _copy_kernel(
     tl.store(out, tile, mask=cols[None, :] < width)
 
 
-def _padded(x: torch.Tensor, centre: torch.Tensor | None, tensor_cores: bool, nodes: bool = False) -> torch.Tensor:
+def _padded(
+    x: torch.Tensor, centre: torch.Tensor | None, tensor_cores: bool, nodes: bool = False, one: bool = False
+) -> torch.Tensor:
     """x - centre (x of shape (n, n_features), any strides) as the kernels load it: for the float32 kernel transposed,
     (1, n_features, n'); for the tensor-core kernel as its big and small TF32 parts, (2, n', width), or for nodes
-    (2, width, n'), the order in which it loads them the fastest. n' >= n is a multiple of the tiles and width >=
-    n_features one of 8 (16 before Triton 3.8), with zeros beyond, so that loads need no masks. About 8x faster than
-    torch's copy of x.T, which reads or writes with a stride of n_features."""
+    (2, width, n'), the order in which it loads them the fastest, or with one (1xTF32) as is, (1, n', width) or
+    (1, width, n'). n' >= n is a multiple of the tiles and width >= n_features one of 8 (16 before Triton 3.8), with
+    zeros beyond, so that loads need no masks. About 8x faster than torch's copy of x.T, which reads or writes with a
+    stride of n_features."""
     n, n_features = x.shape
     n_out = -(-n // _PAD) * _PAD
     width = -(-n_features // _TC_MIN_K) * _TC_MIN_K if tensor_cores else n_features
+    parts = 2 if tensor_cores and not one else 1
     if nodes or not tensor_cores:
-        out, strides = x.new_empty(2 if tensor_cores else 1, width, n_out), (1, n_out)
+        out, strides = x.new_empty(parts, width, n_out), (1, n_out)
     else:
-        out, strides = x.new_empty(2, n_out, width), (width, 1)
+        out, strides = x.new_empty(parts, n_out, width), (width, 1)
     with torch.cuda.device(x.device):  # Triton launches on the current device
         _copy_kernel[(n_out // 64, -(-width // 32))](
             x,
@@ -286,7 +298,7 @@ def _padded(x: torch.Tensor, centre: torch.Tensor | None, tensor_cores: bool, no
             *strides,
             out.stride(0),
             centre is not None,
-            tensor_cores,
+            tensor_cores and not one,
         )
     return out
 
@@ -305,6 +317,7 @@ def _bmus(
     manhattan: bool,
     tensor_cores: bool,
     top2: bool,
+    one: bool = False,
 ) -> torch.Tensor:
     if n_samples == 0:  # e.g. none of the samples has a BMU, which leaves no programs to split the nodes over
         return torch.empty((0, 2) if top2 else (0,), dtype=torch.long, device=x.device)
@@ -334,6 +347,7 @@ def _bmus(
                 loop_k,
                 n16,
                 n8,
+                one,
                 bias is not None,
                 top2,
                 _TC_BLOCK,
@@ -369,28 +383,44 @@ def search(
     manhattan: bool,
     tensor_cores: bool,
     top2: bool = False,
+    one: bool = False,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Returns a function of samples x, shape (n, n_features), giving each one's BMU (int64): the node j with the
     least (x - centre) . nodes_j + bias_j, or ||x - nodes_j||_1 if manhattan, the first on ties; with top2 the best
-    two, shape (n, 2), in either order on ties, as torch's topk. The tensor-core kernel does not take manhattan."""
-    w = _padded(nodes, None, tensor_cores, nodes=True)
+    two, shape (n, 2), in either order on ties, as torch's topk. The tensor-core kernel does not take manhattan; with
+    one it takes a single TF32 product (precision="float16")."""
+    w = _padded(nodes, None, tensor_cores, nodes=True, one=one)
     if bias is not None:
         bias = torch.nn.functional.pad(bias, (0, w.shape[-1] - len(nodes)))
-    return lambda x: _bmus(_padded(x, centre, tensor_cores), w, bias, len(x), len(nodes), manhattan, tensor_cores, top2)
+
+    def find(x: torch.Tensor) -> torch.Tensor:
+        samples = _padded(x, centre, tensor_cores, one=one)
+        return _bmus(samples, w, bias, len(x), len(nodes), manhattan, tensor_cores, top2, one)
+
+    return find
 
 
-def check(device: torch.device, n_features: int, tensor_cores: bool, manhattan: bool, bias: bool, top2: bool) -> None:
+def check(
+    device: torch.device,
+    n_features: int,
+    tensor_cores: bool,
+    manhattan: bool,
+    bias: bool,
+    top2: bool,
+    one: bool = False,
+) -> None:
     """Raises unless the variant of a kernel for these arguments finds the exact BMUs of a small search (with bias, a
-    bias and a centre, as for euclidean). Its values are -1, 0 or 1, for the tensor-core kernel up to 2000 features
-    plus a small TF32 part (-2^-13, 0 or 2^-13) on alternate features of the samples and of the nodes, never both, as
-    3xTF32 drops small x small; every sum is then a multiple of 2^-13 below 2^11, exact in float32 in any order. Each
+    bias and a centre, as for euclidean). Its values are -1, 0 or 1, for the 3xTF32 kernel up to 2000 features plus a
+    small TF32 part (-2^-13, 0 or 2^-13) on alternate features of the samples and of the nodes, never both, as 3xTF32
+    drops small x small (1xTF32, with one, drops them all, so it gets none); every sum is then a multiple of 2^-13
+    below 2^11, exact in float32 in any order. Each
     node is there twice, in different parts of the nodes, so that ties must go to the first. As the kernels do not
     specialise on the counts, this compiles the very variant that the search then runs. The reference is on the CPU,
     as cuBLAS raises under torch.use_deterministic_algorithms without CUBLAS_WORKSPACE_CONFIG."""
     generator = torch.Generator().manual_seed(0)
     # an explicit device and dtype, which torch.set_default_device or set_default_dtype would change otherwise
     x, nodes, offsets = torch.randint(-1, 2, (3, 256, n_features), generator=generator, device="cpu").double()
-    if tensor_cores and n_features <= 2000:
+    if tensor_cores and not one and n_features <= 2000:
         small = torch.randint(-1, 2, (2, 256, n_features), generator=generator, device="cpu") * 2.0**-13
         x[:, ::2] += small[0, :, ::2]
         nodes[:, 1::2] += small[1, :, 1::2]
@@ -398,7 +428,8 @@ def check(device: torch.device, n_features: int, tensor_cores: bool, manhattan: 
     scores = torch.cdist(x, nodes, p=1) if manhattan else x @ nodes.T + (offsets[:, 0] if bias else 0)
     b = offsets[:, 0].float().to(device) if bias else None
     centre = None if b is None else b.new_zeros(n_features)
-    found = search(nodes.float().to(device), b, centre, manhattan, tensor_cores, top2)(x.float().to(device)).cpu()
+    find = search(nodes.float().to(device), b, centre, manhattan, tensor_cores, top2, one)
+    found = find(x.float().to(device)).cpu()
     if top2:
         best2 = scores.topk(2, 1, largest=False).values
         exact = torch.equal(scores.gather(1, found).sort(1).values, best2) and (found[:, 0] != found[:, 1]).all()

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- On CUDA, `precision="float16"` (until now MPS only) takes one TF32 product per float32 product (1xTF32: inputs
+  rounded to 11 significant bits, products summed in float32) in the tensor-core kernel instead of three, on its GPUs
+  (A100, H100, B200), with the same self-check minus the small TF32 parts, which 1xTF32 drops; a failure leaves the
+  3xTF32 kernel. `labels_`, `predict`, `transform` and the error measures stay on 3xTF32. Untested: it was written
+  without a CUDA GPU.
+
 ## 0.5.0 (2026-10-24)
 
 - On MPS (Apple GPUs, torch >= 2.6; tested with 2.8 and 2.14), the BMU search runs in fused Metal kernels, which keep
