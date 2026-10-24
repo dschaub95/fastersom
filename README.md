@@ -51,8 +51,8 @@ Options:
   tuning.
 - `verbose=True` shows a progress bar over the epochs of `fit`, with an estimate of the remaining time.
 - `deterministic=True` makes `fit` give the same map in every run on CUDA and MPS, whose atomic additions otherwise
-  vary in order. On CUDA it sums the samples per node as 64-bit fixed-point integers (on an A100 up to 1.5x slower on
-  small maps, about 5% from 100 x 100 nodes), on MPS with a matrix product (1.2-1.8x slower). It is also used under
+  vary in order. On CUDA it sums the samples per node as 64-bit fixed-point integers (on an A100 up to 2x slower on
+  small maps, 3-10% from 100 x 100 nodes), on MPS with a matrix product (1.2-1.8x slower). It is also used under
   `torch.use_deterministic_algorithms(True)`. The CPU is always deterministic; maps from different devices still differ
   by float rounding.
 

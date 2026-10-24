@@ -383,6 +383,15 @@ def test_deterministic(device, monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_deterministic_keeps_small_values():
+    # fixed point scaled for the 1e16 would round every 1 to 0; node 0 holds only the 1s
+    X = np.ones((1024, 1), np.float32)
+    X[-1] = 1e16
+    som = SOM(1, 2, n_epochs=1, sigma_initial=0.1, init=[[1], [1e16]], device="cuda", deterministic=True).fit(X)
+    assert som.weights_[0, 0] == pytest.approx(1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
     som = SOM(5, 4, n_epochs=2, random_state=0, device="cuda").fit(data)
     payload = pickle.dumps(som)
@@ -422,9 +431,8 @@ def test_fused_matches_torch(fused, monkeypatch, metric, n_samples, n_features, 
     som = SOM.from_weights(weights.astype(np.float32), n_rows, n_cols, metric=metric, device="cuda")
     n_nodes = n_rows * n_cols
     if metric != "manhattan" and n_nodes > 64 and n_nodes * n_features >= 8192:
-        assert som._kernel(n_features) == (
-            "tensor-core" if torch.cuda.get_device_capability() in fused._FAST_TF32 else "float32"
-        )
+        fast_tf32 = torch.cuda.get_device_capability() in fused._FAST_TF32
+        assert som._kernel(n_features) == ("tensor-core" if fast_tf32 else "float32" if n_features <= 128 else None)
     else:
         assert som._kernel(n_features) == ("float32" if metric == "manhattan" or n_features <= 128 else None)
     labels, distances = som.predict(X, return_distance=True)
