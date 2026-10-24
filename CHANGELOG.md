@@ -20,16 +20,18 @@
   take two batch x nodes matrices, at 1.5x the time of `cdist`.
 - The new parameter `precision="float16"` lets `fit`'s BMU search round samples and nodes to 11 significant bits
   (float16's), summing the products in float32, under euclidean, cosine and correlation from 16 features with the Metal
-  kernels on MPS: as half inputs, scaled by powers of 2 per feature into half's range on the GPU (data within 2^-30 to
-  2^30, else float32), with the bias added in float32. They pass an exact self-check (of integers, exact in half) or
-  fall back to float32. On CUDA the search stays float32.
-  `labels_`, `predict`, `transform` and the error measures stay float32. Near-tied samples flip BMUs, more on larger
-  maps: in a CPU emulation of 0-1 scaled pixels 0.6% at 30 x 30 nodes and 36% at 300 x 300, with an equally good map
-  (quantization and topographic error and Leiden clusters of the nodes within the spread of refitting without 1% of the
-  samples); on the synthetic 480,000 x 34 data at 100 x 100 nodes the same quantization error but a topographic error of
-  0.044 instead of 0.032 (mean of 4 seeds), which a final epoch in float32 does not reduce. On an M3 Max, whose half
-  products are no faster than float32 ones, `fit` is 1.00-1.05x faster; it is meant for M5 GPUs, where it is
-  untested. BF16 is not offered: in the emulation it reorganised maps from 200 x 200 nodes.
+  kernels on MPS: as half inputs, scaled by powers of 2 per feature into half's range on the GPU (samples and initial
+  weights within 2^-30 to 2^30, else float32), with the bias added in float32; cosine's samples are centred on the mean
+  node for it, which halves its flips. The kernels pass an exact self-check (of integers, scaled by 2^-3 to 2^3 per
+  feature) or fall back to float32. On CUDA the search stays float32, as do `labels_`, `predict`, `transform` and the
+  error measures. Near-tied samples flip BMUs, more on larger maps and depending on the data: on clustered 0-1 pixels of
+  34 features about 1% at 10 x 10 nodes and 10-35% from 30 x 30 (60% under cosine without its centring), each within the
+  rounding error, with the squared distance to the node found 0.6% above the best on average. In a CPU emulation of such
+  pixels quantization and topographic error and Leiden clusters of the nodes stayed within the spread of refitting
+  without 1% of the samples; on the synthetic 480,000 x 34 data at 100 x 100 nodes the quantization error is the same
+  but the topographic error 0.044 instead of 0.032 (mean of 4 seeds), which a final epoch in float32 does not reduce. On
+  an M3 Max, whose half products are no faster than float32 ones, `fit` is 1.00-1.05x faster; it is meant for M5 GPUs,
+  where it is untested. BF16 is not offered: in the emulation it reorganised maps from 200 x 200 nodes.
 - On MPS with the fused kernels, `deterministic=True` adds the samples per node as 64-bit fixed-point integers, like
   CUDA, by pairs of 32-bit atomic additions with the carry (Apple GPUs have no 64-bit atomic addition), instead of with
   a one-hot matrix product: on an M3 Max 1.4x slower than without at 10 x 10 nodes, 1.14x at 30 x 30 and no slower from

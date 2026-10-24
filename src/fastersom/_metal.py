@@ -9,10 +9,12 @@ many features or nodes bmu_staged streams chunks of the nodes through threadgrou
 simdgroups, and reads the samples from device memory. Manhattan distances take the ALUs instead (bmu_l1), in tiles of
 up to 8 samples x 4 nodes per thread.
 
-Apple GPUs have no faster matrix precision to trade for float32 (on an M3 Max half and bfloat matrices are as fast
-as float, about 10 TFLOP/s), so unlike the CUDA tensor-core kernel the search computes in float32 throughout. The
-kernels compile from source at runtime (torch.mps.compile_shader, no Xcode needed), once per feature count, in about
-0.2 s; the system caches the compiled pipelines on disk.
+Before the M5, Apple GPUs have no faster matrix precision to trade for float32 (on an M3 Max half and bfloat matrices
+are as fast as float, about 10 TFLOP/s), so unlike the CUDA tensor-core kernel the search computes in float32; only
+fit under precision="float16" takes half inputs, summed in float32 (the _half variants). fixed_sums adds fit's
+deterministic per-node sums as 64-bit fixed point. The kernels compile from source at runtime
+(torch.mps.compile_shader, no Xcode needed), once per feature count, in about 0.2 s; the system caches the compiled
+pipelines on disk.
 """
 
 from collections.abc import Callable
@@ -211,8 +213,6 @@ BMU_DOT("bmu_dot_top2", false, true, float)
 BMU_DOT("bmu_dot_centre_top2", true, true, float)
 BMU_DOT("bmu_dot_half", false, false, half)
 BMU_DOT("bmu_dot_centre_half", true, false, half)
-BMU_DOT("bmu_dot_top2_half", false, true, half)
-BMU_DOT("bmu_dot_centre_top2_half", true, true, half)
 #endif
 
 // bmu_dot's search for many features or nodes: the samples come padded and centred, (rows, ST_KP) with the column of
@@ -293,7 +293,6 @@ kernel void bmu_staged(
 BMU_STAGED("bmu_staged", false, float)
 BMU_STAGED("bmu_staged_top2", true, float)
 BMU_STAGED("bmu_staged_half", false, half)
-BMU_STAGED("bmu_staged_top2_half", true, half)
 
 // adds value to the 64-bit integer at word (its low word first) by two 32-bit atomic additions, as Apple GPUs have no
 // 64-bit one: the low word's returns its old value, from which follows the carry into the high word, so that the sum
@@ -532,12 +531,14 @@ def _staged_samples(x: torch.Tensor, centre: torch.Tensor | None, x_scale: torch
     out = x.new_zeros(
         -(-n // block) * block, sample_width(n_features), dtype=torch.half if x_scale is not None else None
     )
-    rows = x if centre is None else x - centre
+    if x_scale is not None:
+        out[:n, :n_features] = (x if centre is None else x - centre) * x_scale
+    elif centre is None:
+        out[:n, :n_features] = x
+    else:  # without a copy of x - centre
+        torch.sub(x, centre, out=out[:n, :n_features])
     if x_scale is None:
-        out[:n, :n_features] = rows
         out[:n, n_features] = 1
-    else:
-        out[:n, :n_features] = rows * x_scale
     return out
 
 
@@ -605,9 +606,12 @@ def search(
     """Returns a function of samples x, shape (n, n_features), giving each one's BMU (int64): the node j with the
     least (x - centre) . nodes_j + bias_j, or ||x - nodes_j||_1 if manhattan, the first on ties; with top2 the best
     two, shape (n, 2), in either order on ties, as torch's topk. With bound, the most |x - centre| per feature of the
-    samples to come (within HALF_RANGE), dot products take half inputs, scaled by half_scales (precision float16).
-    parts sets the parts the nodes are split into (else chosen from the batch), whose results
-    torch then reduces; staged whether bmu_staged searches dot products (else chosen from the sizes)."""
+    samples to come (within HALF_RANGE), dot products take half inputs, scaled by half_scales (precision float16, not
+    with top2, which only topographic_error takes). parts sets the parts the nodes are split into (else chosen from the
+    batch), whose results torch then reduces; staged whether bmu_staged searches dot products (else chosen from the
+    sizes)."""
+    if bound is not None and (top2 or manhattan):
+        raise ValueError("the half kernels take neither top2 nor manhattan")
     nodes = nodes.float().contiguous()
     n_nodes, n_features = nodes.shape
     library = _library(n_features)
@@ -653,7 +657,7 @@ def fixed_sums(
 ) -> None:
     """Adds the samples x (n, n_features) to the fixed-point sums of their BMUs bmus (int64), in place: x * 2^shift
     (int32 per feature) rounded to sums, the remainders times 2^low_shift rounded to lows, both int64 (nodes,
-    n_features); see the kernel."""
+    n_features); see the kernel. Subnormal values (below 2^-126) count as 0, as Apple GPUs flush them."""
     library, x = _library(x.shape[1]), _rows(x)
     rows = _MAX_THREADS // x.shape[1]
     for part, part_bmus in zip(x.split(rows), bmus.split(rows), strict=True):
@@ -665,8 +669,10 @@ def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, to
     """Raises unless the kernels for these arguments find the exact BMUs of a small search, with the nodes in one part
     and in several, for dot products by bmu_staged and, if it takes this many features, bmu_dot, with half the half
     variants. 250 samples and 250 nodes fill no tile, so that the partial tiles and padded nodes run too, and with bias
-    the samples have an integer centre. Its values are -1, 0 or 1, exact also in half and scaled by powers of 2, so
-    that every sum is an integer below 2^24, exact in float32 in any order, also in the reference on the CPU. Each
+    the samples have an integer centre. Its values are -1, 0 or 1, for dot products times 2^-3 to 2^3 by feature (the
+    nodes divided by it), which the half variants must undo, exact also in half and scaled by powers of 2, so that every
+    product is -1, 0 or 1 and every sum an integer below 2^24, exact in float32 in any order, also in the reference on
+    the CPU. Each
     node is there twice, in different parts of the nodes, so that ties must go to the first."""
     generator = torch.Generator().manual_seed(0)
     # an explicit generator and dtype keep it on the CPU in float32, which torch.set_default_device or
@@ -674,6 +680,9 @@ def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, to
     x, nodes, offsets = torch.randint(-1, 2, (3, 250, n_features), generator=generator, dtype=torch.float32)
     nodes[125:] = nodes[:125]
     centre = offsets[1] if bias else None
+    if not manhattan:  # features of different scales, 2^-3 to 2^3, and the nodes by the inverse: the same products
+        scale = torch.ldexp(torch.ones(n_features), torch.arange(n_features) % 7 - 3)
+        x, nodes, centre = x * scale, nodes / scale, None if centre is None else centre * scale
     if manhattan:
         scores = torch.cdist(x, nodes, p=1)
     else:

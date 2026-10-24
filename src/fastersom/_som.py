@@ -250,14 +250,15 @@ class SOM:
             launches them and takes the torch path, as on the CPU.
         precision: ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11
             significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
-            scaled by powers of 2 per feature into half's range. Only under euclidean, cosine and correlation from 16
-            features with the Metal kernels, else float32 (as on CUDA); labels_, predict, transform and the error
-            measures stay float32. It flips the BMUs of near-tied
-            samples, more of them on larger maps (in a CPU emulation of 0-1 scaled pixels, 0.6% at 30 x 30 nodes and
-            36% at 300 x 300), which gives an equally good map rather than the same one (quantization and
-            topographic error and Leiden clusters of the nodes within the spread of refitting without 1% of the
-            samples). On an M3 Max the search is only 1.03-1.13x faster, as its half matrices are no faster than
-            float32 ones; M5 GPUs should gain more, which is untested.
+            scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30).
+            Only under euclidean, cosine and correlation from 16 features with the Metal kernels, else float32 (as on
+            CUDA); labels_, predict, transform and the error measures stay float32. The BMUs of near-tied samples
+            flip, more of them on larger maps and depending on the data (on clustered 0-1 pixels of 34 features about
+            1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
+            node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
+            same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
+            is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs should gain more,
+            which is untested.
 
     Attributes:
         weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
@@ -383,7 +384,7 @@ class SOM:
         if not self.fused:
             return None
         n_nodes, manhattan = self.n_rows * self.n_cols, self.metric == "manhattan"
-        half = half and not manhattan and n_features >= _HALF_MIN_FEATURES
+        half = half and not top2 and not manhattan and n_features >= _HALF_MIN_FEATURES
         kernels = []
         if _metal(self._device) is not None:
             kernels += ["metal-float16"] if half else []
@@ -523,12 +524,15 @@ class SOM:
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
         if kernel == "metal-float16":
-            if self.metric == "euclidean":
-                bound = magnitude + centre.abs()
-            elif self.metric == "correlation":  # rows centred twice (see _centre), each within twice the largest |x|
+            if self.metric == "cosine":
+                # centred on the mean node, with c . v as the bias, so that half rounds the smaller x - c (on clustered
+                # 0-1 pixels half as many near-ties flip as of the uncentred scores)
+                centre = weights.mean(0)
+                bias = nodes @ centre
+            if self.metric == "correlation":  # rows centred twice (see _centre), each within twice the largest |x|
                 bound = (4 * magnitude.amax()).expand_as(magnitude)
             else:
-                bound = magnitude
+                bound = magnitude + centre.abs()
             search = _metal(self._device).search(nodes, bias, centre, manhattan, top2, bound=bound)
         elif kernel == "metal":
             search = _metal(self._device).search(nodes, bias, centre, manhattan, top2)
@@ -601,25 +605,26 @@ class SOM:
             self.__dict__.pop(attr, None)
         data = self._check_X(X)
         weights = self._init_weights(data)
-        kernel = self._kernel(data.shape[1], half=self.precision == "float16")
         deterministic = self._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
+        magnitude, half = None, self.precision == "float16"
+        if deterministic or half:
+            magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
+        if half and _metal(self._device) is not None:
+            # the nodes stay among the samples and the initial weights, so these bound all that the half kernels scale
+            half = _metal(self._device).in_half_range(torch.maximum(magnitude, weights.abs().amax(0)))
+        kernel = self._kernel(data.shape[1], half=half)
         mps = self._device.type == "mps"
         # deterministic sums add int64 fixed point, which unlike index_add_'s atomic float additions gives the same
-        # result in any order: on CUDA with index_add_, on MPS with the Metal kernels' 64-bit atomic additions (MPS
-        # without them, e.g. with fused=False, sums with a one-hot matrix product instead, in a fixed order). Each
+        # result in any order: on CUDA with index_add_, on MPS with the Metal kernels' pairs of 32-bit atomic additions
+        # (MPS without them, e.g. with fused=False, sums with a one-hot matrix product instead, in a fixed order). Each
         # feature is scaled by a power of 2 that leaves room for n_samples values, which alone would round every value
         # to about n_samples * 2^-62 of the feature's largest magnitude (a node of only small values could sum to 0); a
         # second word adds the rounding remainders, exact in float64, scaled by 2^(62 - log2(n_samples)), so that values
         # are lost only below about n_samples^2 * 2^-124 of the largest
         fixed_point = deterministic and (not mps or kernel in _METAL)
         n_nodes, batch_size = weights.shape[0], self._batch_size_for(data, kernel)
-        magnitude = None
-        if fixed_point or kernel == "metal-float16":
-            magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
-        if kernel == "metal-float16" and not _metal(self._device).in_half_range(magnitude):
-            kernel = "metal"  # whose scales would leave float32's exponents
         if fixed_point:
             low_shift = 62 - len(data).bit_length()  # remainders within +-0.5, so their sums below 2^61
             # frexp is not implemented on MPS, and n_features values are quick to do on the CPU

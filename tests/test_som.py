@@ -524,28 +524,63 @@ def test_fused_ties_and_offsets(fused):
     assert_ties_and_offsets("cuda")
 
 
-def float16_case(device):
-    """Pixel-like data of 20 features, 0-1 scaled with clusters, and a float32 and a float16 fit of a 20 x 20 map."""
+def float16_case(device, monkeypatch, module, keyword):
+    """Pixel-like data of 20 features, 0-1 scaled with clusters, and a float32 and a float16 fit of a 24 x 24 map (over
+    8192 node features, so that CUDA's tensor-core kernels take it), and how many of the float16 fit's searches had
+    keyword, which turns half on in module's search."""
     rng = np.random.default_rng(0)
     centres = rng.random((12, 20))
     X = np.clip(centres[rng.integers(12, size=20_000)] + rng.normal(scale=0.05, size=(20_000, 20)), 0, 1)
     X = X.astype(np.float32)
-    kwargs = dict(n_rows=20, n_cols=20, random_state=0, device=device)
-    return X, SOM(**kwargs).fit(X), SOM(precision="float16", **kwargs).fit(X)
+    kwargs = dict(n_rows=24, n_cols=24, random_state=0, device=device)
+    ref = SOM(**kwargs).fit(X)
+    search, halves = module.search, []
+
+    def spy(nodes, *args, **kw):
+        if len(nodes) == 24 * 24:  # not the self-checks' searches
+            halves.append(kw.get(keyword) is not None and kw.get(keyword) is not False)
+        return search(nodes, *args, **kw)
+
+    monkeypatch.setattr(module, "search", spy)
+    som = SOM(precision="float16", **kwargs).fit(X)
+    monkeypatch.undo()
+    return X, ref, som, halves
 
 
-def assert_float16_fit(X, ref, som):
-    # an equally good map, not the same one; labels_ and the error measures from float32 searches
+def assert_float16_fit(X, ref, som, halves):
+    # every epoch's search in half, then labels_ in float32; an equally good map, not the same one
+    assert halves == [True] * som.n_epochs + [False]
+    assert not np.array_equal(som.weights_, ref.weights_)
     assert som.quantization_error(X) == pytest.approx(ref.quantization_error(X), rel=0.02)
     assert abs(som.topographic_error(X) - ref.topographic_error(X)) < 0.02
-    np.testing.assert_array_equal(som.labels_, som.predict(X))  # predict searches in float32
 
 
-def test_metal_float16(metal_som):
-    X, ref, som = float16_case("mps")
-    assert som._kernel(20, half=True) == "metal-float16"
-    assert som._kernel(15, half=True) == "metal"  # fewer features stay in float32, as does manhattan
-    assert_float16_fit(X, ref, som)
+def test_metal_float16(metal_som, monkeypatch):
+    assert_float16_fit(*float16_case("mps", monkeypatch, metal_som._metal(torch.device("mps")), "bound"))
+    som = SOM(24, 24, metric="manhattan", device="mps")
+    som._setup()
+    assert som._kernel(20, half=True) == "metal"  # as with fewer than 16 features
+    som = SOM(24, 24, device="mps")
+    som._setup()
+    assert som._kernel(15, half=True) == "metal"
+
+
+def test_metal_float16_falls_back_beyond_half_range(data, metal_som, monkeypatch):
+    # the nodes' scales would leave float32's exponents, so fit searches in float32
+    module, halves = metal_som._metal(torch.device("mps")), []
+    search = module.search
+    monkeypatch.setattr(module, "search", lambda *args, **kw: halves.append(kw.get("bound")) or search(*args, **kw))
+    SOM(6, 6, n_epochs=1, precision="float16", device="mps").fit(np.tile(data, 4) * 2.0**31)
+    assert halves
+    assert all(bound is None for bound in halves)
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")
+def test_deterministic_without_fused_kernels():
+    # on MPS without the Metal kernels, the deterministic sums take a one-hot matrix product
+    X = np.random.default_rng(0).normal(size=(20_000, 6)).astype(np.float32)
+    kwargs = dict(n_rows=4, n_cols=4, n_epochs=2, random_state=0, device="mps", fused=False, deterministic=True)
+    np.testing.assert_array_equal(SOM(**kwargs).fit(X).weights_, SOM(**kwargs).fit(X).weights_)
 
 
 def test_metal_ties_and_offsets(metal_som):
