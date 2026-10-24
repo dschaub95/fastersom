@@ -1,0 +1,44 @@
+{
+  "template": "https://github.com/scverse/cookiecutter-scverse",
+  "commit": "0bebb8fe6e96b2ae142e629a889a8ec8695412e0",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "fastersom",
+      "package_name": "fastersom",
+      "project_description": "Fast batch self-organising maps (SOM) in PyTorch for GPU and CPU",
+      "author_full_name": "Darius Schaub",
+      "author_email": "darius.schaub@zmnh.uni-hamburg.de",
+      "github_user": "dschaub95",
+      "github_repo": "fastersom",
+      "license": "Apache License Version 2.0",
+      "ide_integration": false,
+      "issue_categorization": "labels",
+      "_copy_without_render": [
+        ".github/workflows/build.yaml",
+        ".github/workflows/test.yaml",
+        "docs/_templates/autosummary/**.rst"
+      ],
+      "_exclude_on_template_update": [
+        "CHANGELOG.md",
+        "LICENSE",
+        "README.md",
+        "docs/api.md",
+        "docs/index.md",
+        "docs/notebooks/example.ipynb",
+        "docs/references.bib",
+        "docs/references.md",
+        "src/**",
+        "tests/**"
+      ],
+      "_render_devdocs": false,
+      "_jinja2_env_vars": {
+        "lstrip_blocks": true,
+        "trim_blocks": true
+      },
+      "_template": "https://github.com/scverse/cookiecutter-scverse",
+      "_commit": "0bebb8fe6e96b2ae142e629a889a8ec8695412e0"
+    }
+  },
+  "directory": null
+}

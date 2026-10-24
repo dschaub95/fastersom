@@ -65,7 +65,7 @@ CONFIGS = [
 ]
 # packages each library needs besides this project's environment; XPySom on the GPU also needs CuPy
 PACKAGES = {"fastersom": [], "xpysom": ["xpysom==1.0.7"], "torchsom": ["torchsom==1.3.1"]}
-# uv.lock does not cover these packages, so their dependencies resolve as of this date
+# not among the project's dependencies, so they and their dependencies resolve as of this date
 EXCLUDE_NEWER = "2026-10-23T00:00:00Z"
 
 

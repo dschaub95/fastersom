@@ -13,7 +13,8 @@ BMU is j, numerator = H @ S and denominator = H @ n, H the (nodes x nodes) neigh
 grid is separable, H = H_rows (x) H_cols, so both products take one matrix product along the rows and one along the
 columns, O(nodes * (n_rows + n_cols)) per epoch instead of O(n_samples * nodes), without ever building H.
 
-References:
+References
+----------
     T. Kohonen, Self-Organizing Maps, 3rd ed., Springer, 2001.
     J. Vesanto et al., SOM Toolbox for Matlab 5, Helsinki University of Technology, 2000.
 """
@@ -27,7 +28,7 @@ from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
 from types import ModuleType
-from typing import Literal, overload
+from typing import Any, Literal, cast, overload
 
 import numpy as np
 import torch
@@ -80,21 +81,24 @@ def _warn(error: Exception, message: str) -> None:
 
 @cache
 def _triton(device: torch.device) -> ModuleType | None:
-    """fastersom._kernels if Triton compiles kernels for the device, else None: not on ROCm (whose 64-thread warps the
+    """Load the Triton kernels if they compile for the device.
+
+    fastersom._kernels if Triton compiles kernels for the device, else None: not on ROCm (whose 64-thread warps the
     tiling lacks), not below compute capability 7.0 (which Triton does not support, like torch.compile; on a Pascal
     GP100 its PTX codegen fails), without Triton with Gluon (Triton >= 3.5), and after a warning without a C compiler or
-    the Python headers, which Triton needs for its launchers."""
+    the Python headers, which Triton needs for its launchers.
+    """
     if device.type != "cuda" or torch.version.hip is not None or torch.cuda.get_device_capability(device) < (7, 0):
         return None
     try:
         from fastersom import _kernels
-    except Exception:  # not only ImportError: an older Gluon can fail on its decorators
+    except Exception:  # noqa: BLE001  # not only ImportError: an older Gluon can fail on its decorators
         return None
     try:
         _kernels.search(torch.ones(1, 1, device=device), None, None, True, False)  # compiles the nodes' copy only
     except torch.OutOfMemoryError:
         raise
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001  # any compile or launch failure falls back to the next kernel
         _warn(
             error,
             "fastersom's fused CUDA kernels failed ({}), using the slower torch path. Triton needs a C compiler and "
@@ -106,8 +110,11 @@ def _triton(device: torch.device) -> ModuleType | None:
 
 @cache
 def _metal(device: torch.device) -> ModuleType | None:
-    """fastersom._metal if torch compiles Metal kernels for the device (MPS, torch >= 2.6), else None. The kernels
-    compile per feature count, so that one that does not compile fails in _works."""
+    """Load the Metal kernels if torch compiles them for the device.
+
+    fastersom._metal if torch compiles Metal kernels for the device (MPS, torch >= 2.6), else None. The kernels
+    compile per feature count, so that one that does not compile fails in _works.
+    """
     if device.type != "mps" or not hasattr(torch.mps, "compile_shader"):
         return None
     from fastersom import _metal as kernels
@@ -122,19 +129,22 @@ def _out_of_memory(error: Exception) -> bool:
 
 @cache
 def _works(device: torch.device, kernel: str, n_features: int, metric: str, top2: bool) -> bool:
-    """Whether a fused kernel's variant for these arguments passes its self-check (fastersom._kernels.check or
+    """Whether a fused kernel variant passes its self-check.
+
+    Whether a fused kernel's variant for these arguments passes its self-check (fastersom._kernels.check or
     fastersom._metal.check), before any batch size is chosen for it. A failure warns and turns off the kernel's
     variants not yet checked on the device; those that passed stay on, as they passed an exact check of the very code
     that runs, and switching kernels within a session would change results between fits. Running out of memory is no
-    failure of the kernel and raises."""
+    failure of the kernel and raises.
+    """
     if (device, kernel) in _FAILED:
         return False
     try:
         manhattan, bias = metric == "manhattan", metric == "euclidean"
         if kernel in _METAL:
-            _metal(device).check(device, n_features, manhattan, bias, top2, kernel == "metal-float16")
+            _module(device, kernel).check(device, n_features, manhattan, bias, top2, kernel == "metal-float16")
         else:
-            _triton(device).check(device, n_features, kernel == "tensor-core", manhattan, bias, top2)
+            _module(device, kernel).check(device, n_features, kernel == "tensor-core", manhattan, bias, top2)
     except Exception as error:
         if _out_of_memory(error):
             raise
@@ -146,8 +156,16 @@ def _works(device: torch.device, kernel: str, n_features: int, metric: str, top2
     return True
 
 
+def _module(device: torch.device, kernel: str) -> ModuleType:
+    """The module of a fused kernel, fastersom._metal or fastersom._kernels, which must be available on the device."""
+    module = _metal(device) if kernel in _METAL else _triton(device)
+    if module is None:
+        raise RuntimeError(f"the {kernel} kernel is not available on {device}")
+    return module
+
+
 def _is_int(value, minimum: int) -> bool:
-    return isinstance(value, int | np.integer) and not isinstance(value, bool) and value >= minimum
+    return bool(isinstance(value, int | np.integer) and not isinstance(value, bool) and value >= minimum)
 
 
 def _default_device() -> torch.device:
@@ -167,11 +185,14 @@ def _is_available(device: torch.device) -> bool:
 
 
 def _cdist(x: torch.Tensor, y: torch.Tensor, p: Literal[1, 2]) -> torch.Tensor:
-    """The L1 (p=1) or exact euclidean (p=2) distance of every row of x to every row of y. On MPS, torch's cdist under
+    """L1 or exact euclidean distance of every row of x to every row of y.
+
+    The L1 (p=1) or exact euclidean (p=2) distance of every row of x to every row of y. On MPS, torch's cdist under
     p=1 and its exact euclidean mode hold the differences of every pair of rows at once, len(x) x len(y) x n_features
     floats (36 GB for 26,843 samples, 10,000 nodes and 34 features), several times over, so there the distances add
     up one feature at a time instead, in two len(x) x len(y) matrices (1.5x the time of cdist at 20,000 samples, 900
-    nodes and 34 features)."""
+    nodes and 34 features).
+    """
     if x.device.type != "mps":
         return torch.cdist(x, y, p=p, compute_mode="donot_use_mm_for_euclid_dist")
     out = torch.zeros(len(x), len(y), dtype=x.dtype, device=x.device)
@@ -205,69 +226,89 @@ class SOM:
     the ALUs under manhattan, up to 512 features), compiled at runtime in about 0.2 s per feature count and checked in
     the same way.
 
-    Args:
-        n_rows: Number of grid rows.
-        n_cols: Number of grid columns.
-        n_epochs: Number of epochs; each makes one weight update from all samples. With 0, fit keeps the initial
-            weights.
-        sigma_initial: Initial gaussian neighbourhood width in grid units. Defaults to
-            ceil(min(n_rows, n_cols) / 2) / 2.
-        sigma_final: Width the exponential schedule decays towards (reached at t = n_epochs), > 0. Defaults to
-            min(0.1 * sigma_initial, 1): a tenth of the initial width, at most one grid unit, so that a large map is
-            not smoothed beyond the resolution of its units (on 100 x 100 nodes the quantization error is 9-13%
-            lower than with 0.1 * sigma_initial = 2.5); maps up to 40 x 40 nodes are unaffected. Smaller widths lower
-            the quantization error further but raise the topographic error. 0.1 * sigma_initial reproduces XPySom's
-            schedule.
-        init: ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
-            normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
-            shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
-            map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
-            largely retrains the map; to continue training, pass a small sigma_initial such as the previous
-            sigma_final.
-        metric: ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
-            (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
-            the nodes to the neighbourhood-weighted mean of the raw samples (not the median for manhattan, nor the
-            centred samples for correlation). Zero-norm samples under cosine and constant samples under correlation
-            have no BMU: they get label -1, are excluded from the update and the error measures, and have distance 1
-            to every node in transform.
-        random_state: Seed for the initialisation.
-        device: Torch device. Defaults to cuda, then mps, then cpu.
-        batch_size: Samples processed at once in BMU search, aggregation, predict and transform. Affects memory
-            (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
-            epoch's update is the same up to float summation order, but over several epochs such rounding differences
-            (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-            to 8192 on CPU and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
-            kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
-            recommends; 65536 before torch 2.5).
-        memory_fraction: Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
-            on CUDA and 0.5 on MPS, whose memory the system and other apps share.
-        verbose: Whether fit shows a progress bar over the epochs, with an estimate of the remaining time. On GPUs, it
-            then waits for each epoch to finish before starting the next.
-        deterministic: Whether fit gives the same map in every run on CUDA and MPS, whose atomic additions of the
-            per-node sums otherwise vary in order, so that near-tied BMUs can flip between runs. On CUDA, and on MPS
-            with the fused Metal kernels, the sums then add the samples as 64-bit fixed-point integers, whose sum does
-            not depend on the order, at a small cost (on an M3 Max 1.4x at 10 x 10 nodes, none from 100 x 100); on MPS
-            without the kernels they take a matrix product with a one-hot nodes x batch matrix (1.2-1.8x slower).
-            Also used when ``torch.use_deterministic_algorithms(True)`` is set. The CPU is always deterministic. Maps
-            from different devices still differ by float rounding.
-        fused: Whether the BMU search on CUDA and MPS may use the fused kernels. With False, it never compiles or
-            launches them and takes the torch path, as on the CPU.
-        precision: ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11
-            significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
-            scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30).
-            Only under euclidean, cosine and correlation from 16 features with the Metal kernels, else float32 (as on
-            CUDA); ``labels_``, predict, transform and the error measures stay float32. The BMUs of near-tied samples
-            flip, more of them on larger maps and depending on the data (on clustered 0-1 pixels of 34 features about
-            1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
-            node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
-            same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
-            is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs may gain more,
-            which is untested.
+    Parameters
+    ----------
+    n_rows
+        Number of grid rows.
+    n_cols
+        Number of grid columns.
+    n_epochs
+        Number of epochs; each makes one weight update from all samples. With 0, fit keeps the initial
+        weights.
+    sigma_initial
+        Initial gaussian neighbourhood width in grid units. Defaults to
+        ceil(min(n_rows, n_cols) / 2) / 2.
+    sigma_final
+        Width the exponential schedule decays towards (reached at t = n_epochs), > 0. Defaults to
+        min(0.1 * sigma_initial, 1): a tenth of the initial width, at most one grid unit, so that a large map is
+        not smoothed beyond the resolution of its units (on 100 x 100 nodes the quantization error is 9-13%
+        lower than with 0.1 * sigma_initial = 2.5); maps up to 40 x 40 nodes are unaffected. Smaller widths lower
+        the quantization error further but raise the topographic error. 0.1 * sigma_initial reproduces XPySom's
+        schedule.
+    init
+        ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
+        normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
+        shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
+        map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
+        largely retrains the map; to continue training, pass a small sigma_initial such as the previous
+        sigma_final.
+    metric
+        ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
+        (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
+        the nodes to the neighbourhood-weighted mean of the raw samples (not the median for manhattan, nor the
+        centred samples for correlation). Zero-norm samples under cosine and constant samples under correlation
+        have no BMU: they get label -1, are excluded from the update and the error measures, and have distance 1
+        to every node in transform.
+    random_state
+        Seed for the initialisation.
+    device
+        Torch device. Defaults to cuda, then mps, then cpu.
+    batch_size
+        Samples processed at once in BMU search, aggregation, predict and transform. Affects memory
+        (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
+        epoch's update is the same up to float summation order, but over several epochs such rounding differences
+        (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
+        to 8192 on CPU and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
+        kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
+        recommends; 65536 before torch 2.5).
+    memory_fraction
+        Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
+        on CUDA and 0.5 on MPS, whose memory the system and other apps share.
+    verbose
+        Whether fit shows a progress bar over the epochs, with an estimate of the remaining time. On GPUs, it
+        then waits for each epoch to finish before starting the next.
+    deterministic
+        Whether fit gives the same map in every run on CUDA and MPS, whose atomic additions of the
+        per-node sums otherwise vary in order, so that near-tied BMUs can flip between runs. On CUDA, and on MPS
+        with the fused Metal kernels, the sums then add the samples as 64-bit fixed-point integers, whose sum does
+        not depend on the order, at a small cost (on an M3 Max 1.4x at 10 x 10 nodes, none from 100 x 100); on MPS
+        without the kernels they take a matrix product with a one-hot nodes x batch matrix (1.2-1.8x slower).
+        Also used when ``torch.use_deterministic_algorithms(True)`` is set. The CPU is always deterministic. Maps
+        from different devices still differ by float rounding.
+    fused
+        Whether the BMU search on CUDA and MPS may use the fused kernels. With False, it never compiles or
+        launches them and takes the torch path, as on the CPU.
+    precision
+        ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11
+        significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
+        scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30).
+        Only under euclidean, cosine and correlation from 16 features with the Metal kernels, else float32 (as on
+        CUDA); ``labels_``, predict, transform and the error measures stay float32. The BMUs of near-tied samples
+        flip, more of them on larger maps and depending on the data (on clustered 0-1 pixels of 34 features about
+        1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
+        node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
+        same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
+        is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs may gain more,
+        which is untested.
 
-    Attributes:
-        weights_: Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
-        labels_: BMU of every training sample under the final weights. Not set by from_weights.
-        n_features_in_: Number of features seen in fit.
+    Attributes
+    ----------
+    weights_
+        Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
+    labels_
+        BMU of every training sample under the final weights. Not set by from_weights.
+    n_features_in_
+        Number of features seen in fit.
     """
 
     def __init__(
@@ -306,8 +347,11 @@ class SOM:
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
-        """Returns a fitted map with the given weights (shapes as for init), like ``SOM(n_rows, n_cols, n_epochs=0,
-        init=weights, **kwargs).fit(X)`` but without data, so ``labels_`` is not set."""
+        """Create a fitted map from given weights.
+
+        Returns a fitted map with the given weights (shapes as for init), like ``SOM(n_rows, n_cols, n_epochs=0,
+        init=weights, **kwargs).fit(X)`` but without data, so ``labels_`` is not set.
+        """
         som = cls(n_rows, n_cols, init=weights, **{"n_epochs": 0, **kwargs})
         som._setup()
         som._set_weights(som._given_weights())
@@ -363,7 +407,7 @@ class SOM:
             try:
                 X = torch.from_dlpack(X)
             except RuntimeError:  # torch cannot import negative strides
-                X = torch.from_dlpack(X.copy())
+                X = torch.from_dlpack(cast(Any, X).copy())
         else:  # numpy refuses to export read-only arrays through DLPack
             X = np.ascontiguousarray(X)
         return torch.as_tensor(X, dtype=torch.float32, device=self._device)
@@ -380,19 +424,23 @@ class SOM:
         return data
 
     def _kernel(self, n_features: int, top2: bool = False, half: bool = False) -> str | None:
-        """The fused kernel of the BMU search, on CUDA "tensor-core" or "float32", on MPS "metal", or None for the
+        """Choose the fused kernel of the BMU search.
+
+        The fused kernel of the BMU search, on CUDA "tensor-core" or "float32", on MPS "metal", or None for the
         torch path; with half (fit under precision="float16") first "metal-float16" for dot-product scores from
         _HALF_MIN_FEATURES features. The tensor-core kernel searches dot-product scores on the GPUs of _FAST_TF32,
         for over 64 nodes (a tile of 128 is half empty otherwise) and n_nodes x n_features >= 8192 (below, the float32
-        kernel is as fast or faster on an A100); a kernel that fails its self-check leaves the next one."""
+        kernel is as fast or faster on an A100); a kernel that fails its self-check leaves the next one.
+        """
         if not self.fused:
             return None
         n_nodes, manhattan = self.n_rows * self.n_cols, self.metric == "manhattan"
         half = half and not top2 and not manhattan and n_features >= _HALF_MIN_FEATURES
         kernels = []
-        if _metal(self._device) is not None:
+        metal = _metal(self._device)
+        if metal is not None:
             kernels += ["metal-float16"] if half else []
-            kernels += ["metal"] if _metal(self._device).supported(n_features, manhattan) else []
+            kernels += ["metal"] if metal.supported(n_features, manhattan) else []
         elif _triton(self._device) is not None:
             if not manhattan and n_nodes > 64 and n_nodes * n_features >= 8192:
                 fast_tf32 = torch.cuda.get_device_capability(self._device) in _FAST_TF32
@@ -422,7 +470,7 @@ class SOM:
             if kernel == "tensor-core":
                 per_sample = 16 * (-(-n_features // 16) * 16) + 32
             elif kernel in _METAL:
-                per_sample = 4 * (4 * n_features + _metal(self._device).sample_width(n_features)) + 32
+                per_sample = 4 * (4 * n_features + _module(self._device, kernel).sample_width(n_features)) + 32
             else:
                 per_sample = 16 * n_features + 32
             return max(1, min((1 << 26) // n_features, int(fraction * free) // per_sample))
@@ -460,9 +508,9 @@ class SOM:
         rng = np.random.RandomState(self.random_state)
         n_nodes = self.n_rows * self.n_cols
         if self.init == "random":
-            weights = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
-            weights /= np.linalg.norm(weights, axis=-1, keepdims=True)
-            return torch.as_tensor(weights.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
+            values = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
+            values /= np.linalg.norm(values, axis=-1, keepdims=True)
+            return torch.as_tensor(values.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
         has_bmu = self._has_bmu(data)
         candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
         if len(candidates) == 0:
@@ -506,6 +554,7 @@ class SOM:
         nodes, bias, centre = self._operands(weights)
         if bias is None:
             return self._centre(batch) @ nodes.T
+        assert centre is not None  # euclidean has both
         if batch.device.type == "mps":
             # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
             # further pass over the scores, which is slower at the small batches of large maps; a column of ones in
@@ -518,9 +567,12 @@ class SOM:
     def _search(
         self, weights: torch.Tensor, kernel: str | None, top2: bool = False, magnitude: torch.Tensor | None = None
     ) -> Callable[[torch.Tensor], torch.Tensor]:
-        """Returns a function of a batch giving each sample's BMU, or with top2 its best two nodes, shape (batch, 2), by
+        """Build the BMU search of a batch.
+
+        Returns a function of a batch giving each sample's BMU, or with top2 its best two nodes, shape (batch, 2), by
         the given fused kernel (from _kernel), without the batch x nodes scores, or the torch path. magnitude: for
-        "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales."""
+        "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales.
+        """
         if kernel is None:
             if top2:
                 return lambda batch: self._scores(batch, weights).topk(2, 1, largest=False).indices
@@ -528,6 +580,7 @@ class SOM:
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
         if kernel == "metal-float16":
+            assert magnitude is not None  # fit passes it under precision="float16"
             if self.metric == "cosine":
                 # centred on the mean node, with c . v as the bias, so that half rounds the smaller x - c (on clustered
                 # 0-1 pixels half as many near-ties flip as of the uncentred scores)
@@ -536,12 +589,13 @@ class SOM:
             if self.metric == "correlation":  # rows centred twice (see _centre), each within twice the largest |x|
                 bound = (4 * magnitude.amax()).expand_as(magnitude)
             else:
+                assert centre is not None  # set for euclidean and, above, for cosine
                 bound = magnitude + centre.abs()
-            search = _metal(self._device).search(nodes, bias, centre, manhattan, top2, bound=bound)
+            search = _module(self._device, kernel).search(nodes, bias, centre, manhattan, top2, bound=bound)
         elif kernel == "metal":
-            search = _metal(self._device).search(nodes, bias, centre, manhattan, top2)
+            search = _module(self._device, kernel).search(nodes, bias, centre, manhattan, top2)
         else:
-            search = _triton(self._device).search(nodes, bias, centre, manhattan, kernel == "tensor-core", top2)
+            search = _module(self._device, kernel).search(nodes, bias, centre, manhattan, kernel == "tensor-core", top2)
         return lambda batch: search(self._centre(batch))
 
     def _score_distances(self, batch: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
@@ -571,6 +625,7 @@ class SOM:
             elif self.metric == "manhattan":
                 distances.append((batch - weights[bmu]).abs().sum(1))
             else:
+                assert nodes is not None
                 score = (self._centre(batch) * nodes[bmu]).sum(1, keepdim=True)
                 distances.append(self._score_distances(batch, score)[:, 0])
         bmu = torch.cat(bmus)
@@ -595,14 +650,19 @@ class SOM:
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
         """Fits the map, starting from the initialisation given by init.
 
-        Args:
-            X: Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like, torch tensor
-                or DLPack array such as CuPy. Any real values are fine; data is copied to the device once and stays
-                there.
-            y: Ignored.
+        Parameters
+        ----------
+        X
+            Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like, torch tensor
+            or DLPack array such as CuPy. Any real values are fine; data is copied to the device once and stays
+            there.
+        y
+            Ignored.
 
-        Returns:
-            self
+        Returns
+        -------
+        SOM
+            The fitted map.
         """
         self._setup()
         for attr in ("weights_", "labels_", "n_features_in_"):
@@ -613,11 +673,13 @@ class SOM:
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
         magnitude, half = None, self.precision == "float16"
-        if deterministic or (half and _metal(self._device) is not None):  # the Metal half kernels' scales need it
+        metal = _metal(self._device) if half else None  # only then, as fused=False must not compile the kernels
+        if deterministic or (half and metal is not None):  # the Metal half kernels' scales need it
             magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
-        if half and _metal(self._device) is not None:
+        if half and metal is not None:
+            assert magnitude is not None
             # the nodes stay among the samples and the initial weights, so these bound all that the half kernels scale
-            half = _metal(self._device).in_half_range(torch.maximum(magnitude, weights.abs().amax(0)))
+            half = metal.in_half_range(torch.maximum(magnitude, weights.abs().amax(0)))
         kernel = self._kernel(data.shape[1], half=half)
         mps = self._device.type == "mps"
         # deterministic sums add int64 fixed point, which unlike index_add_'s atomic float additions gives the same
@@ -630,6 +692,7 @@ class SOM:
         fixed_point = deterministic and (not mps or kernel in _METAL)
         n_nodes, batch_size = weights.shape[0], self._batch_size_for(data, kernel)
         if fixed_point:
+            assert magnitude is not None
             low_shift = 62 - len(data).bit_length()  # remainders within +-0.5, so their sums below 2^61
             # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
             _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
@@ -643,7 +706,8 @@ class SOM:
         for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
             sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
-            lows = torch.zeros_like(sums) if fixed_point else None
+            # (empty without fixed point)
+            lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)
             # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
             counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=weights.device)
             search = self._search(weights, kernel, magnitude=magnitude)
@@ -653,7 +717,7 @@ class SOM:
                 if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count them)
                     batch = batch * keep[:, None]
                 if fixed_point and mps:
-                    _metal(self._device).fixed_sums(batch, bmus, shift, low_shift, sums, lows)
+                    _module(self._device, "metal").fixed_sums(batch, bmus, shift, low_shift, sums, lows)
                 elif fixed_point:  # in parts of 2^21 values, as the float64 and int64 copies take 6x the memory
                     for rows, part in zip(bmus.split(fixed_rows), batch.split(fixed_rows), strict=True):
                         value = part.double().mul_(scale)
@@ -692,18 +756,25 @@ class SOM:
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Returns the BMU index (int64) per sample; -1 for samples without a BMU (see metric).
 
-        Args:
-            X: Samples, shape (n_samples, n_features) or (..., n_features).
-            return_distance: Whether to also return each sample's distance (float32) to its BMU in the metric, NaN
-                for samples without a BMU. It comes from the same pass as the BMU search, and its mean over the
-                samples with a BMU is quantization_error(X).
+        Parameters
+        ----------
+        X
+            Samples, shape (n_samples, n_features) or (..., n_features).
+        return_distance
+            Whether to also return each sample's distance (float32) to its BMU in the metric, NaN
+            for samples without a BMU. It comes from the same pass as the BMU search, and its mean over the
+            samples with a BMU is quantization_error(X).
 
-        Returns:
+        Returns
+        -------
+        numpy.ndarray or tuple of numpy.ndarray
             The BMU indices, or the tuple (BMU indices, distances) if return_distance.
         """
         self._check_fitted()
         bmus, distances = self._bmus(self._check_X(X), self._weights, return_distance)
-        return (bmus.cpu().numpy(), distances.cpu().numpy()) if return_distance else bmus.cpu().numpy()
+        if distances is None:
+            return bmus.cpu().numpy()
+        return bmus.cpu().numpy(), distances.cpu().numpy()
 
     def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
         """Fits the map and returns ``labels_``."""
@@ -741,6 +812,7 @@ class SOM:
         """Mean distance (in the metric) between each sample with a BMU and its BMU."""
         self._check_fitted()
         bmus, distances = self._bmus(self._check_X(X), self._weights)
+        assert distances is not None
         return float(distances[bmus >= 0].cpu().double().mean())  # on the CPU because MPS has no float64
 
     def topographic_error(self, X: ArrayLike | torch.Tensor) -> float:

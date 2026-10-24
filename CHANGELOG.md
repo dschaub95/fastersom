@@ -13,7 +13,13 @@
   `sigma_final=0.1 * sigma_initial` for the old schedule.
 - Documentation on Read the Docs (https://fastersom.readthedocs.io): a user guide, two tutorials (clustering mass
   cytometry like FlowSOM, and pixel clustering of multiplexed images) and the API reference, built with Sphinx in the
-  layout of the scverse cookiecutter template. `pip install fastersom[doc]` installs what the build needs.
+  layout of the scverse cookiecutter template.
+- The repository now follows the [scverse cookiecutter template](https://github.com/scverse/cookiecutter-scverse) as a
+  whole, linked with cruft (`.cruft.json`) so that template updates can be applied: hatchling builds the package, hatch
+  runs the tests, type checks and documentation build, prek runs the checks (ruff with the template's rules, biome,
+  pyproject-fmt, mypy, zizmor), and GitHub Actions test, check the build, autofix pull requests and release. The
+  docstrings are in NumPy style. The package is unchanged apart from type annotations that mypy needed, and it now
+  depends on session-info2, which the issue template uses for version reports.
 
 ## 0.5.0 (2026-10-24)
 

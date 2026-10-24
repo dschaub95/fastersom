@@ -395,8 +395,11 @@ def _fragments(n_features: int) -> int:
 
 
 def _l1_samples(n_features: int) -> int:
-    """Samples per thread of bmu_l1: 8, or fewer for its threadgroup's samples to fit in its threadgroup memory; 0
-    beyond 512 features."""
+    """Samples per thread of the manhattan kernel.
+
+    Samples per thread of bmu_l1: 8, or fewer for its threadgroup's samples to fit in its threadgroup memory; 0
+    beyond 512 features.
+    """
     return min(8, _THREADGROUP_MEMORY // (4 * n_features * (_L1_THREADS // _L1_TX)))
 
 
@@ -407,8 +410,11 @@ def _use_staged(n_nodes: int, n_features: int) -> bool:
 
 
 def supported(n_features: int, manhattan: bool) -> bool:
-    """Whether the kernels take this many features: any under euclidean, cosine and correlation, up to 512 under
-    manhattan, whose threadgroup's samples must fit in its threadgroup memory."""
+    """Whether the Metal kernels support this many features.
+
+    Whether the kernels take this many features: any under euclidean, cosine and correlation, up to 512 under
+    manhattan, whose threadgroup's samples must fit in its threadgroup memory.
+    """
     return not manhattan or _l1_samples(n_features) >= 1
 
 
@@ -472,18 +478,24 @@ def _power_of_2(exponent: torch.Tensor) -> torch.Tensor:
 
 
 def _exponent(magnitude: torch.Tensor) -> torch.Tensor:
-    """An integer e per element with magnitude < 2^e, on the device, as frexp is not on MPS; log2's rounding can only
+    """Integer upper bound on the base-2 exponent of each element.
+
+    An integer e per element with magnitude < 2^e, on the device, as frexp is not on MPS; log2's rounding can only
     raise it by 1. Magnitudes are clamped to HALF_RANGE's low end and 2^34, beyond the largest the scales see (nodes
     -2 (w - c) of samples within 2^30 reach 2^32), so that every scaled value stays below 2^8 (2^8 after rounding to
-    half); the products of half inputs are exact in float32 (on an M3 Max 256 x 256 and 512 x 256 come out exactly)."""
+    half); the products of half inputs are exact in float32 (on an M3 Max 256 x 256 and 512 x 256 come out exactly).
+    """
     return torch.floor(torch.log2(magnitude.float().clamp(HALF_RANGE[0], 2.0**34))) + 1
 
 
 def half_scales(nodes: torch.Tensor, bound: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """For precision float16: powers of 2 per feature for the samples, whose |x - centre| is at most bound, and for the
+    """Per-feature power-of-2 scales for float16 searches.
+
+    For precision float16: powers of 2 per feature for the samples, whose |x - centre| is at most bound, and for the
     nodes, that put both below about 2^8 in half (65504 at most, 2^-14 the smallest normal) and every feature's
     products at 2^g times their value: (the samples' scales with 2^-g appended, the nodes' scales). Computed on the
-    device, as synchronising in every epoch would stall fit on small maps."""
+    device, as synchronising in every epoch would stall fit on small maps.
+    """
     exponent_x, exponent_w = _exponent(bound), _exponent(nodes.abs().amax(0))
     g = 16 - (exponent_x + exponent_w).amax()
     return torch.cat([_power_of_2(8 - exponent_x), _power_of_2(-g)[None]]), _power_of_2(g - 8 + exponent_x)
@@ -492,8 +504,11 @@ def half_scales(nodes: torch.Tensor, bound: torch.Tensor) -> tuple[torch.Tensor,
 def _dot_nodes(
     nodes: torch.Tensor, bias: torch.Tensor | None, w_scale: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """The nodes as bmu_dot loads them: (fragments, padded bias, blocks); with w_scale scaled, in half, without the
-    bias column."""
+    """Lay out the nodes for bmu_dot.
+
+    The nodes as bmu_dot loads them: (fragments, padded bias, blocks); with w_scale scaled, in half, without the
+    bias column.
+    """
     n_nodes, n_features = nodes.shape
     block, kf = _DOT_TN * 8, _fragments(n_features)
     n_blocks = -(-n_nodes // block)
@@ -509,8 +524,11 @@ def _dot_nodes(
 def _staged_nodes(
     nodes: torch.Tensor, bias: torch.Tensor | None, w_scale: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """The nodes as bmu_staged loads them, (features, nodes) with the bias in feature n_features: (nodes, padded bias,
-    blocks); with w_scale scaled, in half, with zeros in feature n_features and the bias added after the products."""
+    """Lay out the nodes for bmu_staged.
+
+    The nodes as bmu_staged loads them, (features, nodes) with the bias in feature n_features: (nodes, padded bias,
+    blocks); with w_scale scaled, in half, with zeros in feature n_features and the bias added after the products.
+    """
     n_nodes, n_features = nodes.shape
     block = _STAGED_TN * 8
     n_blocks = -(-n_nodes // block)
@@ -525,8 +543,11 @@ def _staged_nodes(
 
 
 def _staged_samples(x: torch.Tensor, centre: torch.Tensor | None, x_scale: torch.Tensor | None) -> torch.Tensor:
-    """The samples as bmu_staged loads them: x - centre with a column of ones for the bias, zeros beyond, and rows to a
-    multiple of a threadgroup's; with x_scale scaled, in half, without the column of ones."""
+    """Lay out the samples for bmu_staged.
+
+    The samples as bmu_staged loads them: x - centre with a column of ones for the bias, zeros beyond, and rows to a
+    multiple of a threadgroup's; with x_scale scaled, in half, without the column of ones.
+    """
     n, n_features = x.shape
     block = _STAGED_SG * _STAGED_TM * 8
     out = x.new_zeros(
@@ -554,12 +575,12 @@ def _l1_nodes(nodes: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 def _in_parts(find: Callable[[torch.Tensor], torch.Tensor], samples: int) -> Callable[[torch.Tensor], torch.Tensor]:
-    """find on parts of at most this many samples, concatenated."""
+    """Find on parts of at most this many samples, concatenated."""
     return lambda x: find(x) if len(x) <= samples else torch.cat([find(part) for part in x.split(samples)])
 
 
 def _rows(x: torch.Tensor) -> torch.Tensor:
-    """x with contiguous rows, as bmu_dot and bmu_l1 read it (any row stride)."""
+    """X with contiguous rows, as bmu_dot and bmu_l1 read it (any row stride)."""
     return x if x.stride(1) == 1 else x.contiguous()
 
 
@@ -576,9 +597,12 @@ def _bmus(
     ld_w: int = 0,
     after: tuple = (),
 ) -> torch.Tensor:
-    """The BMUs of the first n_samples rows of x (as the kernel loads them) by the kernel, given its node arguments,
+    """Run a BMU kernel on the first n_samples rows of x.
+
+    The BMUs of the first n_samples rows of x (as the kernel loads them) by the kernel, given its node arguments,
     samples and threads per threadgroup, blocks of nodes, for bmu_staged the nodes' row stride, and the kernel's
-    arguments after the parameters."""
+    arguments after the parameters.
+    """
     if n_samples == 0:  # e.g. none of the samples has a BMU, which leaves no threadgroups to split the nodes over
         return torch.empty((0, 2) if top2 else (0,), dtype=torch.long, device=x.device)
     n_parts, per_part = _parts(n_samples, block_m, n_blocks, parts)
@@ -604,13 +628,16 @@ def search(
     parts: int | None = None,
     staged: bool | None = None,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Returns a function of samples x, shape (n, n_features), giving each one's BMU (int64): the node j with the
+    """Build the BMU search of a Metal kernel variant.
+
+    Returns a function of samples x, shape (n, n_features), giving each one's BMU (int64): the node j with the
     least (x - centre) . nodes_j + bias_j, or ||x - nodes_j||_1 if manhattan, the first on ties; with top2 the best
     two, shape (n, 2), in either order on ties, as torch's topk. With bound, the most |x - centre| per feature of the
     samples to come (within HALF_RANGE), dot products take half inputs, scaled by half_scales (precision float16, not
     with top2, which only topographic_error takes). parts sets the parts the nodes are split into (else chosen from the
     batch), whose results torch then reduces; staged whether bmu_staged searches dot products (else chosen from the
-    sizes)."""
+    sizes).
+    """
     if bound is not None and (top2 or manhattan):
         raise ValueError("the half kernels take neither top2 nor manhattan")
     nodes = nodes.float().contiguous()
@@ -621,10 +648,10 @@ def search(
         w, n_blocks = _l1_nodes(nodes)
         kernel, block_m = getattr(library, "bmu_l1" + suffix), _L1_THREADS // _L1_TX * _l1_samples(n_features)
 
-        def find(x: torch.Tensor) -> torch.Tensor:
+        def find_l1(x: torch.Tensor) -> torch.Tensor:
             return _bmus(_rows(x), len(x), kernel, (w,), block_m, _L1_THREADS, n_blocks, top2, parts)
 
-        return _in_parts(find, _MAX_THREADS // _L1_THREADS * block_m)
+        return _in_parts(find_l1, _MAX_THREADS // _L1_THREADS * block_m)
     centre = None if centre is None else centre.float().contiguous()
     x_scale, w_scale = (None, None) if bound is None else half_scales(nodes, bound)
     suffix += "" if bound is None else "_half"
@@ -636,12 +663,12 @@ def search(
 
         after = (padded_bias if x_scale is None else x_scale[-1:],)  # the products' scale, not read in float32
 
-        def find(x: torch.Tensor) -> torch.Tensor:
+        def find_staged(x: torch.Tensor) -> torch.Tensor:
             samples = _staged_samples(x, centre, None if x_scale is None else x_scale[:-1])
             args = (w, padded_bias)
             return _bmus(samples, len(x), kernel, args, block_m, threads, n_blocks, top2, parts, w.shape[1], after)
 
-        return _in_parts(find, _MAX_THREADS // threads * block_m)
+        return _in_parts(find_staged, _MAX_THREADS // threads * block_m)
     w, padded_bias, n_blocks = _dot_nodes(nodes, bias, w_scale)
     kernel = getattr(library, "bmu_dot" + ("_centre" if centre is not None else "") + suffix)
     args = (padded_bias if centre is None else centre, w, padded_bias)  # the centre is not read without one
@@ -656,9 +683,12 @@ def search(
 def fixed_sums(
     x: torch.Tensor, bmus: torch.Tensor, shift: torch.Tensor, low_shift: int, sums: torch.Tensor, lows: torch.Tensor
 ) -> None:
-    """Adds the samples x (n, n_features) to the fixed-point sums of their BMUs bmus (int64), in place: x * 2^shift
+    """Add samples to the fixed-point sums of their BMUs.
+
+    Adds the samples x (n, n_features) to the fixed-point sums of their BMUs bmus (int64), in place: x * 2^shift
     (int32 per feature) rounded to sums, the remainders times 2^low_shift rounded to lows, both int64 (nodes,
-    n_features); see the kernel. Subnormal values (below 2^-126) count as 0, as Apple GPUs flush them."""
+    n_features); see the kernel. Subnormal values (below 2^-126) count as 0, as Apple GPUs flush them.
+    """
     library, x = _library(x.shape[1]), _rows(x)
     rows = _MAX_THREADS // x.shape[1]
     for part, part_bmus in zip(x.split(rows), bmus.split(rows), strict=True):
@@ -667,13 +697,16 @@ def fixed_sums(
 
 
 def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, top2: bool, half: bool = False) -> None:
-    """Raises unless the kernels for these arguments find the exact BMUs of a small search, with the nodes in one part
+    """Check the Metal kernels for these arguments on a small search.
+
+    Raises unless the kernels for these arguments find the exact BMUs of a small search, with the nodes in one part
     and in several, for dot products by bmu_staged and, if it takes this many features, bmu_dot, with half the half
     variants. 250 samples and 250 nodes fill no tile, so that the partial tiles and padded nodes run too, and with bias
     the samples have an integer centre. Its values are -1, 0 or 1, for dot products times 2^-3 to 2^3 by feature (the
     nodes divided by it), which the half variants must undo, exact also in half and scaled by powers of 2, so that every
     product is -1, 0 or 1 and every sum an integer below 2^24, exact in float32 in any order, also in the reference on
-    the CPU. Each node is there twice, in different parts of the nodes, so that ties must go to the first."""
+    the CPU. Each node is there twice, in different parts of the nodes, so that ties must go to the first.
+    """
     generator = torch.Generator().manual_seed(0)
     # an explicit generator and dtype keep it on the CPU in float32, which torch.set_default_device or
     # set_default_dtype would change otherwise
@@ -688,14 +721,16 @@ def check(device: torch.device, n_features: int, manhattan: bool, bias: bool, to
     else:
         scores = (x if centre is None else x - centre) @ nodes.T + (offsets[:, 0] if bias else 0)
     best2 = scores.topk(2, 1, largest=False).values
-    b, c = (None, None) if not bias else (offsets[:, 0].to(device), centre.to(device))
+    b, c = (None, None) if centre is None else (offsets[:, 0].to(device), centre.to(device))  # a centre iff bias
     bound = None if not half else (x if centre is None else x - centre).abs().amax(0).to(device)
     kernels = [True, False] if _fragments(n_features) <= _REGISTER_FRAGMENTS else [True]  # bmu_staged, bmu_dot
     for staged, parts in product([None] if manhattan else kernels, (1, 4)):
         find = search(nodes.to(device), b, c, manhattan, top2, bound=bound, parts=parts, staged=staged)
         found = find(x.to(device)).cpu()
         if top2:
-            exact = torch.equal(scores.gather(1, found).sort(1).values, best2) and (found[:, 0] != found[:, 1]).all()
+            exact = torch.equal(scores.gather(1, found).sort(1).values, best2) and bool(
+                (found[:, 0] != found[:, 1]).all()
+            )
         else:
             exact = torch.equal(found, scores.argmin(1))
         if not exact:
