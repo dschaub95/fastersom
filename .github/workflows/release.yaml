@@ -27,6 +27,8 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: false
+      - name: Check that the tag matches the package version
+        run: test "${GITHUB_REF_NAME#v}" = "$(uv version --short)"
       - name: Build package
         run: uv build
       - name: Publish package distributions to PyPI
