@@ -12,9 +12,11 @@ license = "Apache-2.0"
 license-files = [ "LICENSE" ]
 maintainers = [
   { name = "Darius Schaub", email = "schaub.darius@gmail.com" },
+  { name = "Malte Kuehl", email = "malte.kuehl@clin.au.dk" },
 ]
 authors = [
-  { name = "Darius Schaub" },
+  { name = "Darius Schaub", email = "schaub.darius@gmail.com" },
+  { name = "Malte Kuehl", email = "malte.kuehl@clin.au.dk" },
 ]
 requires-python = ">=3.12"
 classifiers = [
