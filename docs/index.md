@@ -43,7 +43,7 @@ Source code, issues and the benchmark scripts.
 
 ## Installation
 
-fastersom needs Python 3.11 or newer and PyTorch 2.3 or newer.
+fastersom needs Python 3.12 or newer and PyTorch 2.3 or newer.
 
 ```bash
 pip install fastersom
