@@ -117,7 +117,7 @@ only because an outdated sphinx plugin pins an older version.
 To initialize a virtual environment in the `.venv` directory of your project, simply run
 
 ```bash
-uv sync --all-extras
+uv sync --all-groups
 ```
 
 The `.venv` directory is typically automatically discovered by IDEs such as VS Code.
@@ -134,7 +134,7 @@ we describe how you can manage environments manually using `pip`:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,test,doc]"
+pip install -e . --group dev --group test --group doc  # --group needs pip >= 25.1
 ```
 
 The `.venv` directory is typically automatically discovered by IDEs such as VS Code.
@@ -286,7 +286,7 @@ See scanpy’s {doc}`scanpy:dev/documentation` for more information on how to wr
 
 ### Tutorials with myst-nb and jupyter notebooks
 
-The documentation is set-up to render jupyter notebooks stored in the `docs/notebooks` directory using [myst-nb][].
+The documentation is set-up to render jupyter notebooks stored in the `docs/tutorials` directory using [myst-nb][].
 Currently, only notebooks in `.ipynb` format are supported that will be included with both their input and output cells.
 It is your responsibility to update and re-run the notebook whenever necessary.
 
