@@ -8,7 +8,7 @@
       "package_name": "fastersom",
       "project_description": "Fast batch self-organising maps (SOM) in PyTorch for GPU and CPU",
       "author_full_name": "Darius Schaub",
-      "author_email": "darius.schaub@zmnh.uni-hamburg.de",
+      "author_email": "schaub.darius@gmail.com",
       "github_user": "dschaub95",
       "github_repo": "fastersom",
       "license": "Apache License Version 2.0",

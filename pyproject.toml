@@ -11,7 +11,7 @@ keywords = [ "clustering", "gpu", "kohonen", "pytorch", "self-organizing map", "
 license = "Apache-2.0"
 license-files = [ "LICENSE" ]
 maintainers = [
-  { name = "Darius Schaub", email = "darius.schaub@zmnh.uni-hamburg.de" },
+  { name = "Darius Schaub", email = "schaub.darius@gmail.com" },
 ]
 authors = [
   { name = "Darius Schaub" },
