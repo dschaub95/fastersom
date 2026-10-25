@@ -51,6 +51,8 @@ _FUSED_MAX_FEATURES = 128
 _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
+# samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu)
+_CPU_SUM_ROWS = 1 << 20
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
 # with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
@@ -273,7 +275,7 @@ class SOM:
         (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
         epoch's update is the same up to float summation order, but over several epochs such rounding differences
         (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-        to 8192 on CPU and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
+        on the CPU to 2^24 / n_nodes, from 8192 to 65536, and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
         kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
         recommends; 65536 before torch 2.5).
     memory_fraction
@@ -462,8 +464,12 @@ class SOM:
             free, fraction = torch.cuda.mem_get_info(self._device)[0] + cached, 0.9
         elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
             free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
+        elif self._device.type == "cpu":
+            # larger for fewer nodes, whose score matrix is small: a few operations per batch dominate below about
+            # 2^24 scores (16 MB), and above the matrix product dominates
+            return min(1 << 16, max(8192, (1 << 24) // (self.n_rows * self.n_cols)))
         else:
-            return 8192 if self._device.type == "cpu" else 1 << 16
+            return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
         n_features = data.shape[1]
         if kernel is not None:
@@ -754,6 +760,8 @@ class SOM:
         lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
         # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
         counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=data.device)
+        if data.device.type == "cpu" and not summing["deterministic"]:
+            return self._sums_cpu(data, search, n_nodes, batch_size, transform)
         for batch in data.split(batch_size):
             bmus = search(batch)
             keep = self._has_bmu(batch)
@@ -787,6 +795,31 @@ class SOM:
         elif fixed_point:
             scale = summing["scale"]
             sums = (sums / scale + lows / (scale * 2.0 ** summing["low_shift"])).float()
+        return sums, counts
+
+    def _sums_cpu(
+        self,
+        data: torch.Tensor,
+        search: Callable[[torch.Tensor], torch.Tensor],
+        n_nodes: int,
+        batch_size: int,
+        transform: Callable[[torch.Tensor], torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sum the samples per node on the CPU, in parts of _CPU_SUM_ROWS samples.
+
+        As _sums, but each part's BMUs are found batch by batch and its samples added in one index_add_: on the CPU,
+        index_add_ spreads over the threads only for many rows, and adding batch by batch takes several times as long.
+        """
+        sums = data.new_zeros((n_nodes, data.shape[1]))
+        counts = torch.zeros(n_nodes, dtype=torch.long)
+        for part in data.split(_CPU_SUM_ROWS):
+            bmus = torch.cat([search(batch) for batch in part.split(batch_size)])
+            keep = self._has_bmu(part)
+            values = part if transform is None else transform(part)
+            if keep is not None:
+                values, bmus = values[keep], bmus[keep]
+            sums.index_add_(0, bmus, values)
+            counts += torch.bincount(bmus, minlength=n_nodes)
         return sums, counts
 
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
