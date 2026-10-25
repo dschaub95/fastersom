@@ -2,8 +2,10 @@
 
 A small, fast batch self-organising map (SOM) in [PyTorch](https://pytorch.org): a reimplementation of Kohonen's
 batch map {cite:p}`Kohonen_2001` with a rectangular grid, gaussian neighbourhood and exponentially decaying
-neighbourhood width. Its defaults reproduce the batch-trained maps of [XPySom](https://github.com/Manciukic/xpysom)
-{cite:p}`Mancini_2020` with a gaussian neighbourhood of initial width half the grid.
+neighbourhood width. It computes the same batch update as [XPySom](https://github.com/Manciukic/xpysom)
+{cite:p}`Mancini_2020`, with a gaussian neighbourhood of initial width half the grid that decays to a tenth of that, at
+most one grid unit. On maps up to 40 x 40 nodes the defaults thus reproduce XPySom's batch-trained maps; on larger maps,
+pass `sigma_final=0.1 * sigma_initial` for XPySom's schedule.
 
 The data stays on the device (CUDA, Apple's MPS or the CPU), the best matching unit (BMU) search runs in fused
 kernels on NVIDIA and Apple GPUs, and the per-epoch update smooths per-node sums with the separable gaussian, one small
