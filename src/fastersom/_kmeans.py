@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from math import log
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -9,6 +10,9 @@ from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 from ._som import SOM, _is_int, _synchronize
+
+if TYPE_CHECKING:
+    from ._mst import SpanningTree
 
 _INITS = ("k-means++", "random")
 _METRICS = ("euclidean", "cosine", "correlation")
@@ -346,6 +350,23 @@ class KMeans:
         for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
             rows.copy_(engine._distances(batch))
         return distances.numpy()
+
+    def minimum_spanning_tree(self, exact: bool = True) -> "SpanningTree":
+        """Minimum spanning tree of the centroids in the metric, on the device and with the batch size of the model.
+
+        See :func:`fastersom.minimum_spanning_tree`; the centroids are numbered as in ``cluster_centers_``.
+        """
+        from ._mst import minimum_spanning_tree
+
+        engine = self._check_fitted()
+        return minimum_spanning_tree(
+            self._centroids,
+            self.metric,
+            exact=exact,
+            device=engine._device,
+            batch_size=self.batch_size,
+            memory_fraction=self.memory_fraction,
+        )
 
     def __getstate__(self) -> dict:
         """Keeps the parameters and numpy fitted attributes only, so the pickle does not depend on the device."""

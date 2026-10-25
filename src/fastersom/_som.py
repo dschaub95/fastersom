@@ -28,12 +28,15 @@ from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 import torch
 from numpy.typing import ArrayLike
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from ._mst import SpanningTree
 
 _METRICS = ("euclidean", "manhattan", "cosine", "correlation")
 _INITS = ("random", "sample", "pca")
@@ -1001,6 +1004,23 @@ class SOM:
         )
         total = total / total.max() if total.max() > 0 else total
         return total.cpu().numpy()
+
+    def minimum_spanning_tree(self, exact: bool = True) -> "SpanningTree":
+        """Minimum spanning tree of the nodes in the metric, on the device and with the batch size of the map.
+
+        See :func:`fastersom.minimum_spanning_tree`; the nodes are numbered as in ``weights_``.
+        """
+        from ._mst import minimum_spanning_tree
+
+        self._check_fitted()
+        return minimum_spanning_tree(
+            self._weights,
+            self.metric,
+            exact=exact,
+            device=self._device,
+            batch_size=self.batch_size,
+            memory_fraction=self.memory_fraction,
+        )
 
 
 BatchSOM = SOM
