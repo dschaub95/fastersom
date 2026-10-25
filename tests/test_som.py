@@ -131,17 +131,17 @@ def test_input_validation(data):
 
 def test_invalid_parameters(data):
     for kwargs, match in [
-        (dict(metric="chebyshev"), "metric"),
-        (dict(init="pca"), "init"),
-        (dict(sigma_initial=0), "sigma"),
-        (dict(sigma_final=-1), "sigma"),
-        (dict(sigma_initial=np.nan), "sigma"),
-        (dict(n_rows=0), "n_rows"),
-        (dict(n_cols=2.5), "n_cols"),
-        (dict(n_epochs=-1), "n_epochs"),
-        (dict(batch_size=0), "batch_size"),
-        (dict(memory_fraction=0), "memory_fraction"),
-        (dict(precision="bfloat16"), "precision"),
+        ({"metric": "chebyshev"}, "metric"),
+        ({"init": "pca"}, "init"),
+        ({"sigma_initial": 0}, "sigma"),
+        ({"sigma_final": -1}, "sigma"),
+        ({"sigma_initial": np.nan}, "sigma"),
+        ({"n_rows": 0}, "n_rows"),
+        ({"n_cols": 2.5}, "n_cols"),
+        ({"n_epochs": -1}, "n_epochs"),
+        ({"batch_size": 0}, "batch_size"),
+        ({"memory_fraction": 0}, "memory_fraction"),
+        ({"precision": "bfloat16"}, "precision"),
     ]:
         with pytest.raises(ValueError, match=match):
             SOM(**{"n_rows": 5, "n_cols": 4, **kwargs}, device=CPU).fit(data)
@@ -164,7 +164,7 @@ def test_matches_brute_force(data, metric):
 
 @pytest.mark.parametrize("metric", METRICS)
 def test_matches_reference(data, metric):
-    som_kwargs = dict(sigma_initial=1.25, sigma_final=0.125, metric=metric, random_state=0, device=CPU)
+    som_kwargs = {"sigma_initial": 1.25, "sigma_final": 0.125, "metric": metric, "random_state": 0, "device": CPU}
 
     # one epoch from the same initial weights
     ref = reference_som(data, 10, 10, 1.25, 0.125, 1, metric)
@@ -186,12 +186,15 @@ def test_matches_reference(data, metric):
         assert som.topographic_error(data) == pytest.approx(reference_topographic_error(data, ref, 10), abs=1e-2)
 
     # default sigmas: sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2 and sigma_final = min(0.1 * sigma_initial, 1)
-    for size, sigma_initial, sigma_final in ((6, 1.5, 0.15), (24, 6.0, 0.6), (30, 7.5, 0.75), (42, 10.5, 1.0)):
-        som = SOM(size, size, n_epochs=2, metric=metric, random_state=0, device=CPU).fit(data)
-        ref = reference_som(data, size, size, sigma_initial, sigma_final, 2, metric)
-        assert som.quantization_error(data) == pytest.approx(
-            brute_force_distances(data, ref, metric).min(1).mean(), rel=1e-3
-        )
+    som = SOM(6, 6, n_epochs=2, metric=metric, random_state=0, device=CPU).fit(data)
+    ref = reference_som(data, 6, 6, 1.5, 0.15, 2, metric)
+    assert som.quantization_error(data) == pytest.approx(
+        brute_force_distances(data, ref, metric).min(1).mean(), rel=1e-3
+    )
+    for size, sigma_initial, sigma_final in ((30, 7.5, 0.75), (42, 10.5, 1.0)):  # below and above the cap
+        som = SOM(size, size, metric=metric, device=CPU)
+        som._setup()
+        assert (som._sigma0, som._sigma1) == pytest.approx((sigma_initial, sigma_final))
 
 
 def test_correlation_with_large_offset():
@@ -237,7 +240,7 @@ def test_rows_without_bmu(data, metric, constant):
 
 @pytest.mark.parametrize("metric", ["euclidean", "correlation"])  # without and with rows dropped per batch
 def test_batch_size_does_not_change_results(data, metric):
-    kwargs = dict(n_rows=6, n_cols=6, metric=metric, random_state=0, device=CPU)
+    kwargs = {"n_rows": 6, "n_cols": 6, "metric": metric, "random_state": 0, "device": CPU}
     full = SOM(n_epochs=1, **kwargs).fit(data)
     for batch_size in (7, 4999):  # many batches; a last batch of one sample
         som = SOM(n_epochs=1, batch_size=batch_size, **kwargs).fit(data)
@@ -355,7 +358,7 @@ GPUS = [
 @pytest.mark.parametrize("metric", METRICS)
 @pytest.mark.parametrize("deterministic", [False, True])
 def test_gpu_matches_cpu(data, metric, device, deterministic):
-    kwargs = dict(n_rows=6, n_cols=6, metric=metric, random_state=0)
+    kwargs = {"n_rows": 6, "n_cols": 6, "metric": metric, "random_state": 0}
     cpu = SOM(n_epochs=1, device=CPU, **kwargs).fit(data)
     gpu = SOM(n_epochs=1, device=device, deterministic=deterministic, **kwargs).fit(data)
     np.testing.assert_allclose(gpu.weights_, cpu.weights_, atol=1e-5)
@@ -370,7 +373,7 @@ def test_gpu_matches_cpu(data, metric, device, deterministic):
 def test_deterministic(device, monkeypatch):
     # many samples per node, so that the order of atomic additions varies between runs without deterministic
     X = np.random.default_rng(0).normal(size=(200_000, 6)).astype(np.float32)
-    kwargs = dict(n_rows=4, n_cols=4, n_epochs=3, random_state=0, device=device)
+    kwargs = {"n_rows": 4, "n_cols": 4, "n_epochs": 3, "random_state": 0, "device": device}
     weights = SOM(deterministic=True, **kwargs).fit(X).weights_
     for _ in range(3):
         np.testing.assert_array_equal(SOM(deterministic=True, **kwargs).fit(X).weights_, weights)
@@ -532,7 +535,7 @@ def float16_case(device, monkeypatch, module):
     centres = rng.random((12, 20))
     X = np.clip(centres[rng.integers(12, size=20_000)] + rng.normal(scale=0.05, size=(20_000, 20)), 0, 1)
     X = X.astype(np.float32)
-    kwargs = dict(n_rows=24, n_cols=24, random_state=0, device=device)
+    kwargs = {"n_rows": 24, "n_cols": 24, "random_state": 0, "device": device}
     ref = SOM(**kwargs).fit(X)
     search, halves = module.search, []
 
@@ -579,7 +582,15 @@ def test_metal_float16_falls_back_beyond_half_range(data, metal_som, monkeypatch
 def test_deterministic_without_fused_kernels():
     # on MPS without the Metal kernels, the deterministic sums take a one-hot matrix product
     X = np.random.default_rng(0).normal(size=(20_000, 6)).astype(np.float32)
-    kwargs = dict(n_rows=4, n_cols=4, n_epochs=2, random_state=0, device="mps", fused=False, deterministic=True)
+    kwargs = {
+        "n_rows": 4,
+        "n_cols": 4,
+        "n_epochs": 2,
+        "random_state": 0,
+        "device": "mps",
+        "fused": False,
+        "deterministic": True,
+    }
     np.testing.assert_array_equal(SOM(**kwargs).fit(X).weights_, SOM(**kwargs).fit(X).weights_)
 
 

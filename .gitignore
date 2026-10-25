@@ -1,17 +1,29 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
+# Temp files
+.DS_Store
+*~
+buck-out/
 
-# uv / virtual environments
+# IDEs
+/.idea/
+/.vscode/
+
+# Compiled files
 .venv/
+__pycache__/
+.*cache/
 
-# Benchmark data
-benchmarks/data/
+# Distribution / packaging
+/dist/
+
+# Tests and coverage
+/data/
+/node_modules/
+/.coverage*
+
+# docs
+/docs/generated/
+/docs/_build/
+
+# fastersom: benchmark and tutorial data
+/benchmarks/data/
+/docs/tutorials/data/

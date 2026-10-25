@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose
+  documentation tools need 3.12.
 - `sigma_final` defaults to `min(0.1 * sigma_initial, 1)` instead of `0.1 * sigma_initial`: the final neighbourhood is
   at most one grid unit wide. With the old default, which XPySom uses, a large map ended training with a neighbourhood
   of several units (2.5 at 100 x 100 nodes, 5 at 200 x 200) and was smoothed beyond the resolution of its nodes. On
@@ -11,6 +13,15 @@
   and on 100 x 100 nodes cells of the gated populations below 1% of the cells land more often on nodes of their own
   (0.82 instead of 0.79). Maps up to 40 x 40 nodes (sigma_initial <= 10, e.g. FlowSOM's 10 x 10) are unchanged. Pass
   `sigma_final=0.1 * sigma_initial` for the old schedule.
+- Documentation on Read the Docs (https://fastersom.readthedocs.io): a user guide, two tutorials (clustering mass
+  cytometry like FlowSOM, and pixel clustering of multiplexed images) and the API reference, built with Sphinx in the
+  layout of the scverse cookiecutter template.
+- The repository now follows the [scverse cookiecutter template](https://github.com/scverse/cookiecutter-scverse) as a
+  whole, linked with cruft (`.cruft.json`) so that template updates can be applied: hatchling builds the package, hatch
+  runs the tests, type checks and documentation build, prek runs the checks (ruff with the template's rules, biome,
+  pyproject-fmt, mypy, zizmor), and GitHub Actions test, check the build, autofix pull requests and release. The
+  docstrings are in NumPy style. The package is unchanged apart from type annotations that mypy needed, and it now
+  depends on session-info2, which the issue template uses for version reports.
 
 ## 0.5.0 (2026-10-24)
 

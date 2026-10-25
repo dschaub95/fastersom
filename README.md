@@ -3,7 +3,8 @@
 [![PyPI](https://img.shields.io/pypi/v/fastersom)](https://pypi.org/project/fastersom/)
 [![Downloads](https://static.pepy.tech/badge/fastersom)](https://pepy.tech/projects/fastersom)
 [![Python](https://img.shields.io/pypi/pyversions/fastersom)](https://pypi.org/project/fastersom/)
-[![CI](https://github.com/dschaub95/fastersom/actions/workflows/ci.yml/badge.svg)](https://github.com/dschaub95/fastersom/actions/workflows/ci.yml)
+[![Tests](https://github.com/dschaub95/fastersom/actions/workflows/test.yaml/badge.svg)](https://github.com/dschaub95/fastersom/actions/workflows/test.yaml)
+[![Documentation](https://readthedocs.org/projects/fastersom/badge/?version=latest)](https://fastersom.readthedocs.io)
 [![License](https://img.shields.io/pypi/l/fastersom)](https://github.com/dschaub95/fastersom/blob/main/LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
@@ -12,6 +13,8 @@ rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhoo
 [XPySom](https://github.com/Manciukic/xpysom), with a gaussian neighbourhood of initial width half the grid that
 decays to a tenth of that, at most one grid unit. Data stays on the device (CUDA, MPS or CPU) and the per-epoch update smooths per-node sums with the
 separable gaussian, one small matrix product along each grid axis, so an epoch costs little more than one BMU search.
+
+The [documentation](https://fastersom.readthedocs.io) has a user guide, tutorials and the API reference.
 
 ## Install
 
@@ -162,12 +165,17 @@ supported.
 
 ## Development
 
+The repository follows the [scverse cookiecutter template](https://github.com/scverse/cookiecutter-scverse) and
+receives its updates through [cruft](https://cruft.github.io/cruft/) (`.cruft.json`). With [hatch](https://hatch.pypa.io/):
+
 ```bash
-uv sync                      # installs the dev group: pytest, ruff, pre-commit, twine
-uv run pre-commit install    # ruff, uv-lock and file checks on every commit
-uv run pytest
-uv build && uv run twine check --strict dist/*
+uvx prek install             # ruff, biome, pyproject-fmt, mypy and file checks on every commit
+hatch test                   # the tests (hatch test --all: every Python version of the matrix)
+hatch check types            # mypy
+hatch run docs:build         # the documentation
 ```
+
+See the [contributing guide](https://fastersom.readthedocs.io/en/latest/contributing.html) for details.
 
 ## License
 
