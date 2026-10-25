@@ -17,6 +17,10 @@ repos:
     hooks:
       - id: pyproject-fmt
         groups: [format]
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.13.4
+    hooks:
+      - id: uv-lock
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.5
     hooks:
