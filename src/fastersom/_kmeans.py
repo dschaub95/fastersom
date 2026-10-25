@@ -1,0 +1,336 @@
+"""K-means clustering with the nearest-node search and summation of the SOM."""
+
+from collections.abc import Callable
+from math import log
+
+import numpy as np
+import torch
+from numpy.typing import ArrayLike
+from tqdm import tqdm
+
+from ._som import SOM, _synchronize
+
+_INITS = ("k-means++", "random")
+_METRICS = ("euclidean", "cosine", "correlation")
+_EMPTY = ("farthest", "keep")
+
+
+class KMeans:
+    """K-means clustering (Lloyd's algorithm) on CPUs and on CUDA and Metal GPUs.
+
+    Each iteration assigns every sample to its nearest centroid with the BMU search of :class:`SOM`, including its
+    fused kernels, and moves every centroid to the mean of its samples (see empty_clusters for centroids without).
+    Under cosine and correlation it is spherical k-means: the samples are compared, and averaged, scaled to unit length
+    (and, for correlation, centred over the features), and the centroids are directions.
+
+    Parameters
+    ----------
+    n_clusters
+        Number of clusters.
+    init
+        ``"k-means++"`` (greedy k-means++ as in scikit-learn: from a random sample, every further centroid is the best
+        of ``n_local_trials`` samples drawn with probability proportional to their squared distance to the nearest
+        centroid so far, by the reduction of the total), ``"random"`` (distinct samples drawn at random) or an array of
+        shape (n_clusters, n_features) with the initial centroids.
+    max_iter
+        Largest number of iterations.
+    tol
+        The fit stops when the centroids move, in total squared distance, by at most tol times the mean variance of the
+        features (scikit-learn's criterion), or not at all.
+    metric
+        ``"euclidean"``, ``"cosine"`` or ``"correlation"`` (see :class:`SOM`). Manhattan is not offered, as the mean
+        does not minimise the L1 distance.
+    empty_clusters
+        What happens to a centroid that gets no samples: ``"farthest"`` moves it to the sample farthest from its own
+        centroid, which leaves that centroid's mean (as scikit-learn does; several empty centroids take the farthest
+        samples in decreasing order of distance), at the cost of one more pass over the samples in that iteration;
+        ``"keep"`` leaves it where it is (as cuML does).
+    n_local_trials
+        Candidates per centroid of k-means++. Defaults to 2 + int(log(n_clusters)), as in scikit-learn.
+    compute_labels
+        Whether fit also assigns the samples to the final centroids, for ``labels_`` and ``inertia_``: one more pass
+        over the samples, which a fit for the centroids alone does not need.
+    random_state
+        Seed for the initialisation.
+    device, batch_size, memory_fraction, deterministic, fused
+        As for :class:`SOM`.
+    verbose
+        Whether fit shows a progress bar over the iterations.
+
+    Attributes
+    ----------
+    cluster_centers_
+        Centroids, shape (n_clusters, n_features).
+    n_iter_
+        Number of iterations run.
+    labels_
+        Cluster of every training sample under the final centroids (-1 without a nearest centroid, see metric); with
+        compute_labels only.
+    inertia_
+        Sum over the training samples of the squared euclidean distance to their centroid, or of the cosine (or
+        correlation) distance; with compute_labels only.
+    n_features_in_
+        Number of features seen in fit.
+    """
+
+    def __init__(
+        self,
+        n_clusters: int = 8,
+        init: str | ArrayLike | torch.Tensor = "k-means++",
+        max_iter: int = 300,
+        tol: float = 1e-4,
+        metric: str = "euclidean",
+        empty_clusters: str = "farthest",
+        n_local_trials: int | None = None,
+        compute_labels: bool = True,
+        random_state: int | None = None,
+        device: str | torch.device | None = None,
+        batch_size: int | None = None,
+        memory_fraction: float | None = None,
+        deterministic: bool = False,
+        fused: bool = True,
+        verbose: bool = False,
+    ) -> None:
+        self.n_clusters = n_clusters
+        self.init = init
+        self.max_iter = max_iter
+        self.tol = tol
+        self.metric = metric
+        self.empty_clusters = empty_clusters
+        self.n_local_trials = n_local_trials
+        self.compute_labels = compute_labels
+        self.random_state = random_state
+        self.device = device
+        self.batch_size = batch_size
+        self.memory_fraction = memory_fraction
+        self.deterministic = deterministic
+        self.fused = fused
+        self.verbose = verbose
+
+    def _engine(self) -> SOM:
+        """A map of n_clusters x 1 nodes whose search and summation the fit uses (its grid and schedule unused)."""
+        if self.metric not in _METRICS:
+            raise ValueError(f"metric must be one of {_METRICS}, got {self.metric!r}")
+        if isinstance(self.init, str) and self.init not in _INITS:
+            raise ValueError(f"init must be one of {_INITS} or an array of centroids, got {self.init!r}")
+        if not isinstance(self.max_iter, int) or isinstance(self.max_iter, bool) or self.max_iter < 1:
+            raise ValueError(f"max_iter must be an integer >= 1, got {self.max_iter!r}")
+        if self.empty_clusters not in _EMPTY:
+            raise ValueError(f"empty_clusters must be one of {_EMPTY}, got {self.empty_clusters!r}")
+        if not self.tol >= 0:
+            raise ValueError(f"tol must be >= 0, got {self.tol!r}")
+        engine = SOM(
+            self.n_clusters,
+            1,
+            n_epochs=0,
+            metric=self.metric,
+            random_state=self.random_state,
+            device=self.device,
+            batch_size=self.batch_size,
+            memory_fraction=self.memory_fraction,
+            deterministic=self.deterministic,
+            fused=self.fused,
+        )
+        engine._setup()
+        return engine
+
+    def _initial_centroids(self, engine: SOM, data: torch.Tensor) -> torch.Tensor:
+        if not isinstance(self.init, str):
+            centroids = engine._as_tensor(self.init)
+            if centroids.shape != (self.n_clusters, data.shape[1]):
+                raise ValueError(
+                    f"init must have shape (n_clusters, n_features) = {(self.n_clusters, data.shape[1])}, "
+                    f"got {tuple(centroids.shape)}"
+                )
+            if not torch.isfinite(centroids).all():
+                raise ValueError("init contains NaN or infinite values")
+            return centroids.clone()
+        has_bmu = engine._has_bmu(data)
+        candidates = data if has_bmu is None else data[has_bmu]
+        if len(candidates) < self.n_clusters:
+            raise ValueError(f"n_clusters={self.n_clusters} needs as many samples with a nearest centroid")
+        rng = np.random.default_rng(self.random_state)
+        if self.init == "random":
+            rows = rng.choice(len(candidates), self.n_clusters, replace=False)
+            return candidates[torch.as_tensor(rows, device=data.device)].clone()
+        return self._kmeans_plus_plus(engine, candidates, rng)
+
+    def _kmeans_plus_plus(self, engine: SOM, data: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
+        """Greedy k-means++ on the samples as the metric compares them (squared euclidean distances)."""
+        trials = self.n_local_trials if self.n_local_trials is not None else 2 + int(log(self.n_clusters))
+        compared = engine._compared
+        batch_size = max(1, (1 << 24) // max(trials, 1) // data.shape[1])
+
+        def squared(centres: torch.Tensor) -> torch.Tensor:
+            """Squared distance of every sample to each of the centres, shape (n_samples, len(centres))."""
+            out = []
+            for batch in data.split(batch_size):
+                batch = compared(batch)
+                out.append((batch[:, None, :] - centres[None]).square_().sum(2))
+            return torch.cat(out)
+
+        chosen = [int(rng.integers(len(data)))]
+        centres = [compared(data[chosen[0] : chosen[0] + 1])[0]]
+        closest = squared(centres[0][None])[:, 0]
+        for _ in range(1, self.n_clusters):
+            cumulative = closest.double().cumsum(0) if closest.device.type != "mps" else closest.cumsum(0)
+            draws = torch.as_tensor(rng.uniform(size=trials), dtype=cumulative.dtype, device=cumulative.device)
+            rows = torch.searchsorted(cumulative, draws * cumulative[-1]).clamp_(max=len(data) - 1)
+            candidates = compared(data[rows])
+            potentials = torch.minimum(closest[:, None], squared(candidates))
+            best = int(potentials.sum(0).argmin())
+            closest = potentials[:, best].contiguous()
+            chosen.append(int(rows[best]))
+            centres.append(candidates[best])
+        if self.metric == "euclidean":  # the samples themselves; else their compared form, the centroids' directions
+            return data[torch.as_tensor(chosen, device=data.device)].clone()
+        return torch.stack(centres)
+
+    def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "KMeans":
+        """Fit the centroids, starting from the initialisation given by init.
+
+        Parameters
+        ----------
+        X
+            Samples, shape (n_samples, n_features) or (..., n_features), as for :meth:`SOM.fit`.
+        y
+            Ignored.
+
+        Returns
+        -------
+        KMeans
+            The fitted model.
+        """
+        for attr in ("cluster_centers_", "labels_", "inertia_", "n_iter_", "n_features_in_"):
+            self.__dict__.pop(attr, None)
+        engine = self._engine()
+        data = engine._check_X(X)
+        if not isinstance(self.n_clusters, int) or isinstance(self.n_clusters, bool) or self.n_clusters < 1:
+            raise ValueError(f"n_clusters must be an integer >= 1, got {self.n_clusters!r}")
+        centroids = self._initial_centroids(engine, data)
+        transform: Callable[[torch.Tensor], torch.Tensor] | None = (
+            None if self.metric == "euclidean" else engine._compared
+        )
+        deterministic = engine._device.type != "cpu" and (
+            self.deterministic or torch.are_deterministic_algorithms_enabled()
+        )
+        magnitude = None
+        if deterministic:  # the largest |x| per feature of the values summed: unit rows under cosine and correlation
+            magnitude = (
+                torch.maximum(data.amax(0), -data.amin(0)) if transform is None else data.new_ones(data.shape[1])
+            )
+        kernel = engine._kernel(data.shape[1])
+        batch_size = engine._batch_size_for(data, kernel)
+        summing = engine._summing(len(data), kernel, deterministic, magnitude)
+        threshold = self.tol * float(self._feature_variance(data, transform, batch_size))
+        self.n_iter_ = 0
+        for _ in tqdm(range(self.max_iter), desc="Fitting k-means", unit="iteration", disable=not self.verbose):
+            search = engine._search(centroids, kernel)
+            sums, counts = engine._sums(data, search, self.n_clusters, batch_size, summing, transform)
+            empty = (counts == 0).nonzero()[:, 0]
+            if self.empty_clusters == "farthest" and len(empty):
+                sums, counts = self._relocate(engine, data, centroids, sums, counts, empty, transform)
+            moved = torch.where(counts[:, None] > 0, sums / counts[:, None].clamp_min(1), centroids)
+            shift = float((moved - centroids).square().sum())
+            centroids = moved
+            self.n_iter_ += 1
+            if self.verbose:
+                _synchronize(engine._device)
+            if shift <= threshold:
+                break
+        self.cluster_centers_ = centroids.cpu().numpy()
+        self.n_features_in_ = data.shape[1]
+        self._centroids, self._engine_ = centroids, engine
+        if self.compute_labels:
+            labels, distances = engine._bmus(data, centroids)
+            assert distances is not None
+            self.labels_ = labels.cpu().numpy()
+            values = distances[labels >= 0].double() if distances.device.type != "mps" else distances[labels >= 0]
+            values = values.square() if self.metric == "euclidean" else values
+            self.inertia_ = float(values.sum().cpu())
+        return self
+
+    def _relocate(
+        self,
+        engine: SOM,
+        data: torch.Tensor,
+        centroids: torch.Tensor,
+        sums: torch.Tensor,
+        counts: torch.Tensor,
+        empty: torch.Tensor,
+        transform: Callable[[torch.Tensor], torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Give each empty centroid one of the samples farthest from their centroid, taken from that centroid's sums."""
+        labels, distances = engine._bmus(data, centroids)
+        assert distances is not None
+        distances = torch.nan_to_num(distances, nan=-1.0)  # samples without a centroid are never taken
+        far = distances.topk(min(len(empty), len(data))).indices
+        values = data[far] if transform is None else transform(data[far])
+        sums, counts = sums.clone(), counts.clone()
+        for cluster, sample, value in zip(empty.tolist(), far.tolist(), values, strict=False):
+            old = int(labels[sample])
+            sums[old] -= value
+            counts[old] -= 1
+            sums[cluster] = value
+            counts[cluster] = 1
+        return sums, counts
+
+    def _feature_variance(
+        self, data: torch.Tensor, transform: Callable[[torch.Tensor], torch.Tensor] | None, batch_size: int
+    ) -> float:
+        """The mean over the features of their variance, of the values summed, in two passes."""
+        total = torch.zeros(data.shape[1], dtype=torch.float64)
+        for batch in data.split(batch_size):
+            total += (batch if transform is None else transform(batch)).sum(0).cpu().double()
+        mean = (total / len(data)).float().to(data.device)
+        squares = torch.zeros(data.shape[1], dtype=torch.float64)
+        for batch in data.split(batch_size):
+            values = batch if transform is None else transform(batch)
+            squares += (values - mean).square().sum(0).cpu().double()
+        return float((squares / len(data)).mean())
+
+    def _check_fitted(self) -> SOM:
+        if not hasattr(self, "cluster_centers_"):
+            raise RuntimeError("This KMeans instance is not fitted yet, call fit() first")
+        return self._engine_
+
+    def _check_X(self, engine: SOM, X: ArrayLike | torch.Tensor) -> torch.Tensor:
+        data = engine._check_X(X)
+        if data.shape[1] != self.n_features_in_:
+            raise ValueError(f"X has {data.shape[1]} features, but KMeans was fitted with {self.n_features_in_}")
+        return data
+
+    def predict(self, X: ArrayLike | torch.Tensor) -> np.ndarray:
+        """Return the nearest centroid (int64) of every sample; -1 for samples without one (see metric)."""
+        engine = self._check_fitted()
+        labels, _ = engine._bmus(self._check_X(engine, X), self._centroids, return_distance=False)
+        return labels.cpu().numpy()
+
+    def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
+        """Fit the centroids and return the cluster of every sample (``labels_``, computed even without compute_labels)."""
+        self.fit(X)
+        return self.labels_ if self.compute_labels else self.predict(X)
+
+    def transform(self, X: ArrayLike | torch.Tensor) -> np.ndarray:
+        """Return the distance of every sample to every centroid in the metric, shape (n_samples, n_clusters)."""
+        engine = self._check_fitted()
+        data = self._check_X(engine, X)
+        engine._weights = self._centroids  # the distances of the engine's nodes, which are the centroids
+        distances = torch.empty(len(data), self.n_clusters, dtype=torch.float32)
+        batch_size = engine._batch_size_for(data, None)
+        for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
+            rows.copy_(engine._distances(batch))
+        return distances.numpy()
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state.pop("_engine_", None)
+        state.pop("_centroids", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        if hasattr(self, "cluster_centers_"):
+            engine = self._engine()
+            self._engine_ = engine
+            self._centroids = torch.as_tensor(self.cluster_centers_, device=engine._device)

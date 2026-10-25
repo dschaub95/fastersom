@@ -52,6 +52,7 @@ dev = [
 test = [
   "coverage>=7.10",
   "pytest",
+  "scikit-learn>=1.3",  # reference for KMeans
 ]
 doc = [
   "ipykernel",

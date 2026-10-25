@@ -4,6 +4,16 @@
 
 - Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose
   documentation tools need 3.12.
+- `KMeans`: k-means clustering (Lloyd's algorithm) with the nearest-node search and summation of `SOM`, including the
+  fused kernels on CUDA and MPS and `deterministic`. Greedy k-means++ initialisation as in scikit-learn (or random
+  samples, or given centroids), scikit-learn's convergence criterion, empty clusters moved to the farthest samples as in
+  scikit-learn (or kept, `empty_clusters="keep"`), and spherical k-means under cosine and correlation. From the same
+  initial centroids, centroids, labels and the number of iterations match scikit-learn's `KMeans(algorithm="lloyd")` on
+  the CPU. `compute_labels=False` skips the pass for `labels_` and `inertia_` when only the centroids are needed.
+- `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
+  components, centred at the mean, with the longer side of the map along the first component and each side spanning one
+  standard deviation of its component; under cosine and correlation of the samples as these metrics compare them.
+- The summation of a fit is a method of its own (`SOM._sums`), which `KMeans` shares; the map's arithmetic is unchanged.
 - `sigma_final` defaults to `min(0.1 * sigma_initial, 1)` instead of `0.1 * sigma_initial`: the final neighbourhood is
   at most one grid unit wide. With the old default, which XPySom uses, a large map ended training with a neighbourhood
   of several units (2.5 at 100 x 100 nodes, 5 at 200 x 200) and was smoothed beyond the resolution of its nodes. On

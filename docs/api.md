@@ -1,7 +1,8 @@
 # API
 
-fastersom has one public class, {class}`~fastersom.SOM`, with a scikit-learn-like interface.
-`fastersom.BatchSOM` is an alias of it.
+fastersom has two public classes with scikit-learn-like interfaces: {class}`~fastersom.SOM`, the batch
+self-organising map (`fastersom.BatchSOM` is an alias of it), and {class}`~fastersom.KMeans`, k-means clustering
+with the same nearest-node search.
 
 ```{eval-rst}
 .. module:: fastersom
@@ -11,6 +12,7 @@ fastersom has one public class, {class}`~fastersom.SOM`, with a scikit-learn-lik
     :toctree: generated
 
     SOM
+    KMeans
 ```
 
 ## Overview

@@ -132,7 +132,7 @@ def test_input_validation(data):
 def test_invalid_parameters(data):
     for kwargs, match in [
         ({"metric": "chebyshev"}, "metric"),
-        ({"init": "pca"}, "init"),
+        ({"init": "linear"}, "init"),
         ({"sigma_initial": 0}, "sigma"),
         ({"sigma_final": -1}, "sigma"),
         ({"sigma_initial": np.nan}, "sigma"),
@@ -734,3 +734,61 @@ def test_fused_kernel_failure_degrades(data, fresh, monkeypatch):
     monkeypatch.setattr(kernels, "_bmus", lambda *args: bmus(*args) + 1)
     with pytest.warns(RuntimeWarning, match=r"float32 BMU kernel failed its self-check"):
         assert som._kernel(33) is None
+
+
+def reference_pca_grid(X, n_rows, n_cols, metric="euclidean"):
+    """The SOM Toolbox's linear initialisation in float64, of the rows as the metric compares them."""
+    X = X.astype(np.float64)
+    if metric in ("cosine", "correlation"):
+        X = X[np.linalg.norm(X, axis=1) > 0] if metric == "cosine" else X[X.max(1) > X.min(1)]
+        if metric == "correlation":
+            X = X - X.mean(1, keepdims=True)
+        X = X / np.linalg.norm(X, axis=1, keepdims=True)
+    mean = X.mean(0)
+    values, vectors = np.linalg.eigh(np.cov(X, rowvar=False).reshape(X.shape[1], X.shape[1]))
+    values, vectors = values[::-1].clip(0), vectors[:, ::-1]
+    vectors = vectors * np.sign(vectors[np.abs(vectors).argmax(0), np.arange(vectors.shape[1])])
+    axes = [vectors[:, k] * np.sqrt(values[k]) if k < X.shape[1] else np.zeros(X.shape[1]) for k in range(2)]
+    row_axis, col_axis = (axes[0], axes[1]) if n_rows >= n_cols else (axes[1], axes[0])
+
+    def positions(n):
+        return np.linspace(-1, 1, n) if n > 1 else np.zeros(1)
+
+    grid = mean + positions(n_rows)[:, None, None] * row_axis + positions(n_cols)[None, :, None] * col_axis
+    return grid.reshape(n_rows * n_cols, -1)
+
+
+@pytest.mark.parametrize(("n_rows", "n_cols"), [(3, 5), (5, 3), (4, 4), (1, 6), (6, 1)])
+def test_pca_init_matches_reference(data, n_rows, n_cols):
+    weights = SOM(n_rows, n_cols, n_epochs=0, init="pca", device=CPU).fit(data).weights_
+    np.testing.assert_allclose(weights, reference_pca_grid(data, n_rows, n_cols), rtol=1e-5, atol=1e-5)
+
+
+def test_pca_init_spans_one_standard_deviation():
+    rng = np.random.default_rng(0)
+    rotation, _ = np.linalg.qr(rng.normal(size=(5, 5)))
+    X = ((rng.normal(size=(20000, 5)) * [3.0, 2.0, 1.0, 0.5, 0.2]) @ rotation.T + 4).astype(np.float32)
+    grid = SOM(7, 5, n_epochs=0, init="pca", device=CPU).fit(X).weights_.reshape(7, 5, 5)
+    np.testing.assert_allclose(grid.reshape(-1, 5).mean(0), X.mean(0), atol=0.05)
+    long_axis, short_axis = (grid[-1, 2] - grid[0, 2]) / 2, (grid[3, -1] - grid[3, 0]) / 2
+    assert abs(long_axis @ rotation[:, 0]) / np.linalg.norm(long_axis) > 0.999  # along the first component
+    assert abs(short_axis @ rotation[:, 1]) / np.linalg.norm(short_axis) > 0.999
+    assert np.linalg.norm(long_axis) == pytest.approx(3.0, rel=0.02)
+    assert np.linalg.norm(short_axis) == pytest.approx(2.0, rel=0.02)
+
+
+@pytest.mark.parametrize("metric", ["cosine", "correlation"])
+def test_pca_init_of_compared_rows(data, metric):
+    X = data.copy()
+    X[:10] = 0.0 if metric == "cosine" else 1.5  # rows without a BMU take no part
+    weights = SOM(4, 6, n_epochs=0, init="pca", metric=metric, device=CPU).fit(X).weights_
+    np.testing.assert_allclose(weights, reference_pca_grid(X, 4, 6, metric), rtol=1e-4, atol=1e-5)
+
+
+def test_pca_init_with_one_feature_and_training(data):
+    one = SOM(3, 4, n_epochs=0, init="pca", device=CPU).fit(data[:, :1]).weights_
+    np.testing.assert_allclose(one, reference_pca_grid(data[:, :1], 3, 4), rtol=1e-5, atol=1e-5)
+    trained = SOM(6, 6, n_epochs=5, init="pca", device=CPU).fit(data)
+    assert trained.quantization_error(data) < SOM(6, 6, n_epochs=0, init="pca", device=CPU).fit(
+        data
+    ).quantization_error(data)
