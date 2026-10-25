@@ -8,6 +8,7 @@
 import shutil
 import sys
 from datetime import datetime
+from email.utils import getaddresses
 from importlib.metadata import metadata
 from pathlib import Path
 
@@ -23,7 +24,8 @@ sys.path.insert(0, str(HERE / "extensions"))
 #       If this is the case, reinstall it to refresh the metadata
 info = metadata("fastersom")
 project = info["Name"]
-author = info["Author"]
+# with emails, the authors are only in Author-email (e.g. "Name <email>, Name <email>")
+author = info.get("Author") or ", ".join(name for name, _ in getaddresses([info["Author-email"]]))
 copyright = f"{datetime.now():%Y}, {author}."
 version = info["Version"]
 urls = dict(pu.split(", ") for pu in info.get_all("Project-URL"))
