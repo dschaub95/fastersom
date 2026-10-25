@@ -5,7 +5,6 @@
 [![Python](https://img.shields.io/pypi/pyversions/fastersom)](https://pypi.org/project/fastersom/)
 [![Tests](https://github.com/dschaub95/fastersom/actions/workflows/test.yaml/badge.svg)](https://github.com/dschaub95/fastersom/actions/workflows/test.yaml)
 [![Documentation](https://readthedocs.org/projects/fastersom/badge/?version=latest)](https://fastersom.readthedocs.io)
-[![Documentation](https://readthedocs.org/projects/fastersom/badge/?version=latest)](https://fastersom.readthedocs.io)
 [![License](https://img.shields.io/pypi/l/fastersom)](https://github.com/dschaub95/fastersom/blob/main/LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
