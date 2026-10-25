@@ -185,12 +185,13 @@ def test_matches_reference(data, metric):
     if metric == "euclidean":
         assert som.topographic_error(data) == pytest.approx(reference_topographic_error(data, ref, 10), abs=1e-2)
 
-    # default sigmas: sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2 and sigma_final = 0.1 * sigma_initial
-    som = SOM(6, 6, n_epochs=2, metric=metric, random_state=0, device=CPU).fit(data)
-    ref = reference_som(data, 6, 6, 1.5, 0.15, 2, metric)
-    assert som.quantization_error(data) == pytest.approx(
-        brute_force_distances(data, ref, metric).min(1).mean(), rel=1e-3
-    )
+    # default sigmas: sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2 and sigma_final = min(0.1 * sigma_initial, 1)
+    for size, sigma_initial, sigma_final in ((6, 1.5, 0.15), (24, 6.0, 0.6), (30, 7.5, 0.75), (42, 10.5, 1.0)):
+        som = SOM(size, size, n_epochs=2, metric=metric, random_state=0, device=CPU).fit(data)
+        ref = reference_som(data, size, size, sigma_initial, sigma_final, 2, metric)
+        assert som.quantization_error(data) == pytest.approx(
+            brute_force_distances(data, ref, metric).min(1).mean(), rel=1e-3
+        )
 
 
 def test_correlation_with_large_offset():

@@ -8,9 +8,9 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A small, fast batch self-organising map (SOM) in PyTorch: a reimplementation of Kohonen's batch map with a
-rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhood width. Its defaults reproduce the
-batch-trained maps of [XPySom](https://github.com/Manciukic/xpysom) with a gaussian neighbourhood of initial width
-half the grid. Data stays on the device (CUDA, MPS or CPU) and the per-epoch update smooths per-node sums with the
+rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhood width. It computes the same batch update as
+[XPySom](https://github.com/Manciukic/xpysom), with a gaussian neighbourhood of initial width half the grid that
+decays to a tenth of that, at most one grid unit. Data stays on the device (CUDA, MPS or CPU) and the per-epoch update smooths per-node sums with the
 separable gaussian, one small matrix product along each grid axis, so an epoch costs little more than one BMU search.
 
 ## Install
@@ -51,7 +51,9 @@ Options:
   (`SOM(init=som.weights_).fit(X)`); with `n_epochs=0`, `fit` keeps them unchanged. The sigma schedule restarts at
   `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small
   `sigma_initial`, e.g. the previous map's `sigma_final`.
-- `sigma_initial` and `sigma_final` set the neighbourhood width schedule; the defaults reproduce XPySom's.
+- `sigma_initial` and `sigma_final` set the neighbourhood width schedule. `sigma_final` defaults to
+  `min(0.1 * sigma_initial, 1)`, so that large maps are not smoothed beyond the resolution of their units;
+  `sigma_final=0.1 * sigma_initial` reproduces XPySom's schedule.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the fused
   [CUDA](#fused-cuda-kernels) or [Metal](#fused-metal-kernels) kernels) without changing the algorithm. On CUDA and MPS
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on

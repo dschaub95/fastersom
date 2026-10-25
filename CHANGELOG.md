@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `sigma_final` defaults to `min(0.1 * sigma_initial, 1)` instead of `0.1 * sigma_initial`: the final neighbourhood is
+  at most one grid unit wide. With the old default, which XPySom uses, a large map ended training with a neighbourhood
+  of several units (2.5 at 100 x 100 nodes, 5 at 200 x 200) and was smoothed beyond the resolution of its nodes. On
+  mass cytometry (Levine_32dim, 265,627 cells x 32 markers) and multiplexed imaging (2,000,000 pixels x 34 channels),
+  the quantization error is 9-21% lower at 100 x 100 and 200 x 200 nodes, the topographic error stays at or below
+  0.072 (narrower widths such as 0.5 lower the quantization error further but raise it to about 0.1, 0.25 to 0.24-0.35),
+  and on 100 x 100 nodes cells of the gated populations below 1% of the cells land more often on nodes of their own
+  (0.82 instead of 0.79). Maps up to 40 x 40 nodes (sigma_initial <= 10, e.g. FlowSOM's 10 x 10) are unchanged. Pass
+  `sigma_final=0.1 * sigma_initial` for the old schedule.
+
 ## 0.5.0 (2026-10-24)
 
 - On MPS (Apple GPUs, torch >= 2.6; tested with 2.8 and 2.14), the BMU search runs in fused Metal kernels, which keep
