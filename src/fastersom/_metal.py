@@ -575,12 +575,12 @@ def _l1_nodes(nodes: torch.Tensor) -> tuple[torch.Tensor, int]:
 
 
 def _in_parts(find: Callable[[torch.Tensor], torch.Tensor], samples: int) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Find on parts of at most this many samples, concatenated."""
+    """find on parts of at most this many samples, concatenated."""
     return lambda x: find(x) if len(x) <= samples else torch.cat([find(part) for part in x.split(samples)])
 
 
 def _rows(x: torch.Tensor) -> torch.Tensor:
-    """X with contiguous rows, as bmu_dot and bmu_l1 read it (any row stride)."""
+    """x with contiguous rows, as bmu_dot and bmu_l1 read it (any row stride)."""
     return x if x.stride(1) == 1 else x.contiguous()
 
 

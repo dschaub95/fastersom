@@ -135,6 +135,7 @@ lint.ignore = [
   "D213", # <> We want docstrings to start immediately after the opening triple quote
   "D400", # first line should end with a period [Bug: doesn’t work with single-line docstrings]
   "D401", # First line should be in imperative mood; try rephrasing
+  "D403", # first words may be lowercase parameter names
   "E501", # line too long -> we accept long comment lines; formatter gets rid of long code lines
   "E731", # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
   "E741", # allow I, O, l as variable names -> I is the identity matrix

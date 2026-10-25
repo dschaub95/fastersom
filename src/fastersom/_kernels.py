@@ -150,7 +150,7 @@ def _accumulate(scores, x_k, w_k, MANHATTAN: gl.constexpr):
 
 @triton.jit
 def _tf32_split(a):
-    """A = big + small, big rounded to TF32 (10 of float32's 23 mantissa bits; to nearest, ties away from zero)."""
+    """a = big + small, big rounded to TF32 (10 of float32's 23 mantissa bits; to nearest, ties away from zero)."""
     big = ((a.to(tl.int32, bitcast=True) + 0x1000) & -0x2000).to(tl.float32, bitcast=True)
     return big, a - big
 
@@ -273,7 +273,7 @@ def _copy_kernel(
 def _padded(x: torch.Tensor, centre: torch.Tensor | None, tensor_cores: bool, nodes: bool = False) -> torch.Tensor:
     """Lay out samples or nodes as the kernels load them.
 
-    X - centre (x of shape (n, n_features), any strides) as the kernels load it: for the float32 kernel transposed,
+    x - centre (x of shape (n, n_features), any strides) as the kernels load it: for the float32 kernel transposed,
     (1, n_features, n'); for the tensor-core kernel as its big and small TF32 parts, (2, n', width), or for nodes
     (2, width, n'), the order in which it loads them the fastest. n' >= n is a multiple of the tiles and width >=
     n_features one of 8 (16 before Triton 3.8), with zeros beyond, so that loads need no masks. About 8x faster than
