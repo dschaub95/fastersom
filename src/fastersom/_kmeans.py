@@ -8,7 +8,7 @@ import torch
 from numpy.typing import ArrayLike
 from tqdm import tqdm
 
-from ._som import SOM, _synchronize
+from ._som import SOM, _is_int, _synchronize
 
 _INITS = ("k-means++", "random")
 _METRICS = ("euclidean", "cosine", "correlation")
@@ -109,12 +109,13 @@ class KMeans:
 
     def _engine(self) -> SOM:
         """A map of n_clusters x 1 nodes whose search and summation the fit uses (its grid and schedule unused)."""
+        for name in ("n_clusters", "max_iter"):
+            if not _is_int(getattr(self, name), 1):
+                raise ValueError(f"{name} must be an integer >= 1, got {getattr(self, name)!r}")
         if self.metric not in _METRICS:
             raise ValueError(f"metric must be one of {_METRICS}, got {self.metric!r}")
         if isinstance(self.init, str) and self.init not in _INITS:
             raise ValueError(f"init must be one of {_INITS} or an array of centroids, got {self.init!r}")
-        if not isinstance(self.max_iter, int) or isinstance(self.max_iter, bool) or self.max_iter < 1:
-            raise ValueError(f"max_iter must be an integer >= 1, got {self.max_iter!r}")
         if self.empty_clusters not in _EMPTY:
             raise ValueError(f"empty_clusters must be one of {_EMPTY}, got {self.empty_clusters!r}")
         if not self.tol >= 0:
@@ -205,8 +206,6 @@ class KMeans:
             self.__dict__.pop(attr, None)
         engine = self._engine()
         data = engine._check_X(X)
-        if not isinstance(self.n_clusters, int) or isinstance(self.n_clusters, bool) or self.n_clusters < 1:
-            raise ValueError(f"n_clusters must be an integer >= 1, got {self.n_clusters!r}")
         centroids = self._initial_centroids(engine, data)
         transform: Callable[[torch.Tensor], torch.Tensor] | None = (
             None if self.metric == "euclidean" else engine._compared

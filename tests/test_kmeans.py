@@ -178,3 +178,9 @@ def test_empty_clusters_take_only_samples_with_a_centroid():
     X[0] = [1, 0, 0]  # the only sample with a centroid under cosine; two centroids get none
     centroids = KMeans(3, init=np.eye(3, dtype=np.float32), metric="cosine", max_iter=1, device="cpu").fit(X)
     np.testing.assert_array_equal(centroids.cluster_centers_, [[1, 0, 0], [1, 0, 0], [0, 0, 1]])
+
+
+def test_n_clusters(data):
+    with pytest.raises(ValueError, match="n_clusters must be an integer"):
+        KMeans(0, device="cpu").fit(data)
+    assert KMeans(np.int64(4), device="cpu").fit(data).cluster_centers_.shape == (4, 5)
