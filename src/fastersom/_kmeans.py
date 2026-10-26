@@ -107,7 +107,7 @@ class KMeans:
         self.fused = fused
         self.verbose = verbose
 
-    def _engine(self) -> SOM:
+    def _engine(self, fall_back: bool = False) -> SOM:
         """A map of n_clusters x 1 nodes whose search and summation the fit uses (its grid and schedule unused)."""
         for name in ("n_clusters", "max_iter"):
             if not _is_int(getattr(self, name), 1):
@@ -132,7 +132,7 @@ class KMeans:
             deterministic=self.deterministic,
             fused=self.fused,
         )
-        engine._setup()
+        engine._setup(fall_back)
         return engine
 
     def _initial_centroids(self, engine: SOM, data: torch.Tensor) -> torch.Tensor:
@@ -321,21 +321,24 @@ class KMeans:
         engine = self._check_fitted()
         data = self._check_X(engine, X)
         engine._weights = self._centroids  # the distances of the engine's nodes, which are the centroids
-        distances = torch.empty(len(data), self.n_clusters, dtype=torch.float32)
+        # on the CPU, as it can exceed device memory
+        distances = torch.empty(len(data), self.n_clusters, dtype=torch.float32, device="cpu")
         batch_size = engine._batch_size_for(data, None)
         for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
             rows.copy_(engine._distances(batch))
         return distances.numpy()
 
     def __getstate__(self) -> dict:
-        state = self.__dict__.copy()
-        state.pop("_engine_", None)
-        state.pop("_centroids", None)
+        """Keeps the parameters and numpy fitted attributes only, so the pickle does not depend on the device."""
+        state = {key: value for key, value in self.__dict__.items() if not key.startswith("_")}
+        if isinstance(self.init, torch.Tensor):
+            state["init"] = self.init.cpu()
         return state
 
     def __setstate__(self, state: dict) -> None:
+        """Restores a pickled model on the configured device if available (cpu, cuda, mps), else the default one."""
         self.__dict__.update(state)
         if hasattr(self, "cluster_centers_"):
-            engine = self._engine()
+            engine = self._engine(fall_back=True)
             self._engine_ = engine
             self._centroids = torch.as_tensor(self.cluster_centers_, device=engine._device)

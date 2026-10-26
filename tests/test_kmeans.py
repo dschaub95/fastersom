@@ -184,3 +184,11 @@ def test_n_clusters(data):
     with pytest.raises(ValueError, match="n_clusters must be an integer"):
         KMeans(0, device="cpu").fit(data)
     assert KMeans(np.int64(4), device="cpu").fit(data).cluster_centers_.shape == (4, 5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
+    fitted = KMeans(6, init=torch.as_tensor(data[:6], device="cuda"), max_iter=5, device="cuda").fit(data)
+    payload = pickle.dumps(fitted)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    np.testing.assert_array_equal(pickle.loads(payload).cluster_centers_, fitted.cluster_centers_)
