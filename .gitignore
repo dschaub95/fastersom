@@ -6,6 +6,7 @@ buck-out/
 # IDEs
 /.idea/
 /.vscode/
+/.claude/worktrees/
 
 # Compiled files
 .venv/
