@@ -23,7 +23,7 @@ import subprocess
 import sys
 import sysconfig
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
@@ -543,42 +543,67 @@ class SOM:
     def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
         """Linear initialisation: the grid in the plane of the first two principal components (see init).
 
-        The covariance is summed in two passes in batches, each batch's product in float32 on the device and the sum in
-        float64 on the CPU, so that large inputs lose no precision; its eigenvectors' signs are fixed so that their
-        largest entry is positive.
+        The covariance is summed about the mean of _mean in batches, each batch's product in float32 on the device and
+        the sum in float64 on the CPU, so that large inputs lose no precision, less the part due to the mean's rounding
+        to float32; its eigenvectors' signs are fixed so that their largest entry is positive.
         """
-        has_bmu = self._has_bmu(data)
-        if has_bmu is not None:
-            data = data[has_bmu]
-        if len(data) < 2:
-            raise ValueError("init='pca' needs at least two samples with a BMU")
         n_features, batch_size = data.shape[1], max(1, (1 << 24) // data.shape[1])
-        total = torch.zeros(n_features, dtype=torch.float64)
-        for batch in data.split(batch_size):
-            total += self._compared(batch).sum(0).cpu().double()
-        mean = total / len(data)
+        mean, n_samples = self._mean(data, batch_size)
+        if n_samples < 2:
+            raise ValueError("init='pca' needs at least two samples with a BMU")
         centre = mean.float().to(self._device)
-        covariance = torch.zeros(n_features, n_features, dtype=torch.float64)
-        for batch in data.split(batch_size):
-            centred = self._compared(batch) - centre
+        covariance = torch.zeros(n_features, n_features, dtype=torch.float64, device="cpu")
+        offset = torch.zeros(n_features, dtype=torch.float64, device="cpu")
+        for values in self._compared_batches(data, batch_size):
+            centred = values - centre
             covariance += (centred.T @ centred).cpu().double()
-        values, vectors = torch.linalg.eigh(covariance / (len(data) - 1))
+            offset += centred.sum(0).cpu().double()
+        covariance -= offset[:, None] * offset / n_samples
+        values, vectors = torch.linalg.eigh(covariance / (n_samples - 1))
         values, vectors = values.flip(0).clamp_min(0), vectors.flip(1)
         vectors = vectors * vectors.gather(0, vectors.abs().argmax(0, keepdim=True)).sign()
         axes = [
-            vectors[:, k] * values[k].sqrt() if k < n_features else torch.zeros(n_features, dtype=torch.float64)
+            vectors[:, k] * values[k].sqrt()
+            if k < n_features
+            else torch.zeros(n_features, dtype=torch.float64, device="cpu")
             for k in range(2)
         ]
         long_rows = self.n_rows >= self.n_cols  # the longer side along the first component
         row_axis, col_axis = (axes[0], axes[1]) if long_rows else (axes[1], axes[0])
 
         def positions(n: int) -> torch.Tensor:
-            return torch.linspace(-1, 1, n, dtype=torch.float64) if n > 1 else torch.zeros(1, dtype=torch.float64)
+            if n == 1:
+                return torch.zeros(1, dtype=torch.float64, device="cpu")
+            return torch.linspace(-1, 1, n, dtype=torch.float64, device="cpu")
 
         grid = (
             mean + positions(self.n_rows)[:, None, None] * row_axis + positions(self.n_cols)[None, :, None] * col_axis
         )
         return grid.reshape(self.n_rows * self.n_cols, n_features).float().to(self._device)
+
+    def _compared_batches(self, data: torch.Tensor, batch_size: int) -> Iterator[torch.Tensor]:
+        """The samples with a BMU as the metric compares them (see _compared), batch by batch."""
+        for batch in data.split(batch_size):
+            keep = self._has_bmu(batch)
+            yield self._compared(batch if keep is None else batch[keep])
+
+    def _mean(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, int]:
+        """Mean (float64, on the CPU) and number of the samples with a BMU as the metric compares them.
+
+        Each batch is summed in float32 on the device less the first such sample, so that an offset common to the
+        samples is not rounded however large (equal samples have their exact mean), and the batches' sums in float64
+        on the CPU. The mean is 0 without samples.
+        """
+        total = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        first, n_samples = None, 0
+        for values in self._compared_batches(data, batch_size):
+            if len(values):
+                first = values[0].clone() if first is None else first
+                total += (values - first).sum(0).cpu().double()
+                n_samples += len(values)
+        if first is None:
+            return total, 0
+        return first.cpu().double() + total / n_samples, n_samples
 
     def _has_bmu(self, data: torch.Tensor) -> torch.Tensor | None:
         """Mask of samples with a BMU: non-zero ones (cosine), non-constant ones (correlation); None if all."""

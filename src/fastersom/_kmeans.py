@@ -222,7 +222,7 @@ class KMeans:
         kernel = engine._kernel(data.shape[1])
         batch_size = engine._batch_size_for(data, kernel)
         summing = engine._summing(len(data), kernel, deterministic, magnitude)
-        threshold = self.tol * float(self._feature_variance(data, transform, batch_size))
+        threshold = self.tol * self._feature_variance(engine, data, batch_size) if self.tol else 0.0
         self.n_iter_ = 0
         for _ in tqdm(range(self.max_iter), desc="Fitting k-means", unit="iteration", disable=not self.verbose):
             search = engine._search(centroids, kernel)
@@ -275,19 +275,24 @@ class KMeans:
             counts[cluster] = 1
         return sums, counts
 
-    def _feature_variance(
-        self, data: torch.Tensor, transform: Callable[[torch.Tensor], torch.Tensor] | None, batch_size: int
-    ) -> float:
-        """The mean over the features of their variance, of the values summed, in two passes."""
-        total = torch.zeros(data.shape[1], dtype=torch.float64)
-        for batch in data.split(batch_size):
-            total += (batch if transform is None else transform(batch)).sum(0).cpu().double()
-        mean = (total / len(data)).float().to(data.device)
-        squares = torch.zeros(data.shape[1], dtype=torch.float64)
-        for batch in data.split(batch_size):
-            values = batch if transform is None else transform(batch)
-            squares += (values - mean).square().sum(0).cpu().double()
-        return float((squares / len(data)).mean())
+    @staticmethod
+    def _feature_variance(engine: SOM, data: torch.Tensor, batch_size: int) -> float:
+        """The mean over the features of the variance of the values summed (of the samples with a centroid).
+
+        In two passes as for the covariance of :meth:`SOM._pca_weights`: about the mean of :meth:`SOM._mean`, less the
+        part due to its rounding to float32.
+        """
+        mean, n_samples = engine._mean(data, batch_size)
+        if n_samples == 0:
+            return 0.0
+        centre = mean.float().to(data.device)
+        squares = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        offset = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        for values in engine._compared_batches(data, batch_size):
+            centred = values - centre
+            squares += centred.square().sum(0).cpu().double()
+            offset += centred.sum(0).cpu().double()
+        return float(((squares - offset.square() / n_samples) / n_samples).mean())
 
     def _check_fitted(self) -> SOM:
         if not hasattr(self, "cluster_centers_"):

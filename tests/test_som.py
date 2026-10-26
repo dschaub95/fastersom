@@ -792,3 +792,8 @@ def test_pca_init_with_one_feature_and_training(data):
     assert trained.quantization_error(data) < SOM(6, 6, n_epochs=0, init="pca", device=CPU).fit(
         data
     ).quantization_error(data)
+
+
+def test_pca_init_of_a_large_offset():
+    weights = SOM(3, 1, n_epochs=0, init="pca", device=CPU).fit(np.full((100000, 2), 1e7, np.float32)).weights_
+    np.testing.assert_array_equal(weights, np.full((3, 2), 1e7, np.float32))
