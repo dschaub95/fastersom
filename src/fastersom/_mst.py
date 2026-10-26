@@ -51,7 +51,14 @@ def _unit_roundoff(dtype: torch.dtype, device: torch.device, matmul: bool) -> fl
         return _F64
     if not matmul:
         return 2.0**-24
-    precision = torch.get_float32_matmul_precision()
+    try:
+        precision = torch.get_float32_matmul_precision()
+    except RuntimeError:  # the per-backend fp32_precision settings are in use: the device's, else the global one
+        backend = torch.backends.cuda.matmul if device.type == "cuda" else None
+        setting = getattr(backend, "fp32_precision", "none")
+        if setting == "none":
+            setting = getattr(torch.backends, "fp32_precision", "none")
+        return {"ieee": 2.0**-24, "tf32": 2.0**-11}.get(setting, 2.0**-8)  # unknown: as coarse as bfloat16
     if device.type == "cuda" and torch.backends.cuda.matmul.allow_tf32 and precision == "highest":
         precision = "high"
     return {"highest": 2.0**-24, "high": 2.0**-11}.get(precision, 2.0**-8)
@@ -79,16 +86,24 @@ class _TorchSearch:
 
     nearest() gives each row's nearest point outside its component and whether that choice is certified: whether no
     other point can be as near by W. A fused kernel can take its place through the same interface, given its own
-    bound. Euclidean scores are ||y_j||^2 - 2 y_i . y_j of the centred points y (as the BMU search's); with u the unit
-    roundoff of the scores, r_i = ||y_i||, R = max_j r_j, M_i = r_i + R and d features, they lie within
+    bound. Euclidean scores are ||y_j||^2 - 2 y_i . y_j of the points y centred on their coordinate-wise median; with
+    u the unit roundoff of the scores, r_i = ||y_i||, R = max_j r_j, M_i = r_i + R and d features, they lie within
 
         e_i = gamma_(d+2) M_i^2 + delta_i (2 M_i + delta_i) + gamma_(d+2)(float64) (M_i + delta_i)^2
 
-    of W_ij - ||y_i||^2: the matrix product's rounding, the points' rounding to the search's dtype and their centring
-    (delta_i = 2 u (M_i + ||p_i|| + max_j ||p_j||) bounds how much that moves a distance), and W's own rounding, plus
-    (d + 2) times the smallest normal number for underflow. L1 scores lie within a factor 1 +- g of W_ij,
-    g = gamma_(d+1) + gamma_(d+1)(float64), as differences and sums of non-negative values do not underflow. Both
-    bounds are doubled for the rounding of the bounds and of the test itself.
+    of W_ij - ||y_i||^2: the matrix product's rounding and the bias ||y_j||^2's (bounded by gamma_(d+2) M_i^2, as
+    M_i^2 >= 2 r_i R + R^2), the points' rounding to the search's dtype and their centring (delta_i = 2 u (M_i +
+    ||p_i|| + max_j ||p_j||) bounds how much that moves a distance), and W's own rounding, plus (d + 2) times the
+    smallest normal number for underflow; a further gamma_(d+2) R^2 covers the addition of the bias to the product.
+    L1 scores lie within a factor 1 +- g of W_ij, g = gamma_(d+1) + gamma_(d+1)(float64), as differences and sums of
+    non-negative values do not underflow. Both bounds are doubled for the rounding of the bounds and of the test itself.
+
+    A few points far from the others (outliers, or a long tail of intensities) would set R and loosen every row's bound,
+    so each row's bound uses instead of R a radius R_i >= 2 r_i fitted to its best score b: no point with r_k > R_i
+    can be nearer to row i than its best point j, because ||y_i - y_k|| >= r_k - r_i (less the centring's rounding)
+    exceeds the largest W_ij that b admits; e_i then holds for every point that can be the nearest. Where r_j > R_i or
+    the radius does not exclude the far points, the row takes the bound with R. Non-finite best scores (float32
+    overflow) are never certified, nor an infinite second score unless a single point lies outside the component.
     """
 
     def __init__(self, points: torch.Tensor, manhattan: bool, block: int):
@@ -98,18 +113,41 @@ class _TorchSearch:
         if manhattan:
             self.relative = 2 * (_gamma(n_features + 1, u) + _gamma(n_features + 1, _F64))
             return
-        centred = points - points.mean(0)
+        # centred on the coordinate-wise median, which far points do not move (any centre gives the same W)
+        centre = points.cpu().median(0).values.to(points.device)
+        centred = points - centre
         self.nodes, self.bias, self.centred = -2 * centred, (centred * centred).sum(1), centred
-        norms = centred.cpu().double().norm(dim=1).numpy()  # on the CPU, as MPS has no float64
-        lengths = points.cpu().double().norm(dim=1).numpy()
-        reach = norms + norms.max()
-        delta = 2 * u * (reach + lengths + lengths.max())
-        error = _gamma(n_features + 2, u) * reach**2 + delta * (2 * reach + delta)
-        error += _gamma(n_features + 2, _F64) * (reach + delta) ** 2 + (n_features + 2) * torch.finfo(points.dtype).tiny
-        self.error = 2 * error
-        self.error_ = torch.as_tensor(self.error, dtype=points.dtype, device=self.device)
+        self.norms = centred.cpu().double().norm(dim=1).numpy()  # on the CPU, as MPS has no float64
+        self.lengths = points.cpu().double().norm(dim=1).numpy()
+        self.u, self.n_features, self.tiny = u, n_features, torch.finfo(points.dtype).tiny
+        self.centre_norm = float(centre.cpu().double().norm())
+        rows = np.arange(len(points))
+        self.error = self._bound(rows, np.full(len(points), self.norms.max()), np.full(len(points), self.lengths.max()))
         if self.device.type == "mps":  # the bias as a column of the nodes, for one matrix product as in SOM._scores
             self.operand = torch.cat([self.nodes, self.bias[:, None]], 1).T
+
+    def _bound(self, rows: np.ndarray, radius: np.ndarray, length: np.ndarray) -> np.ndarray:
+        """2 e_i of the rows for points within radius of the centre (r_j <= radius) and of length at most length."""
+        u, d = self.u, self.n_features
+        reach = self.norms[rows] + radius
+        delta = 2 * u * (reach + self.lengths[rows] + length)
+        error = _gamma(d + 2, u) * (reach**2 + radius**2) + delta * (2 * reach + delta)
+        error += _gamma(d + 2, _F64) * (reach + delta) ** 2 + (d + 2) * self.tiny
+        return 2 * error
+
+    def errors(self, rows: np.ndarray, best: np.ndarray, index: np.ndarray) -> np.ndarray:
+        """Each row's bound 2 e_i given its best score and point (see the class): with its own radius where valid."""
+        u, r = self.u, self.norms[rows]
+        with np.errstate(invalid="ignore", over="ignore"):
+            radius = np.minimum(self.norms.max(), np.maximum(2 * r, r + 2 * np.sqrt(np.maximum(best + r * r, 0))))
+            # the points' lengths ||p|| <= r + ||mean|| up to the centring's rounding
+            length = np.minimum(self.lengths.max(), radius + self.centre_norm + 4 * u * (self.lengths.max() + 1))
+            error = self._bound(rows, radius, length)
+            # the smallest distance of a point beyond the radius, less the centring's rounding of both points
+            gap = radius * (1 - 2 * u) - r - 4 * u * (r + 3 * self.centre_norm + self.lengths.max() * u)
+            valid = (self.norms[index] <= radius) & (gap > 0)
+            valid &= (best + r * r + error) * (1 + _gamma(self.n_features + 2, _F64)) < gap * gap
+        return np.where(valid & np.isfinite(error), error, self.error[rows])
 
     def scores(self, rows: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Scores of the rows against all points, inf for the points of the row's own component."""
@@ -125,36 +163,41 @@ class _TorchSearch:
     def nearest(self, rows: np.ndarray, labels: torch.Tensor, certify: bool) -> tuple[np.ndarray, np.ndarray | None]:
         """Each row's nearest point outside its component, and with certify whether it is certainly the nearest by W."""
         nearest, certified = np.empty(len(rows), np.int64), np.empty(len(rows), bool) if certify else None
+        host_labels = labels.cpu().numpy() if certify else None
         for start in range(0, len(rows), self.block):
             part = rows[start : start + self.block]
             scores = self.scores(torch.as_tensor(part, device=self.device), labels)
             if certify:
                 values, indices = scores.topk(2, 1, largest=False)
                 best, second = values.cpu().double().numpy().T
-                nearest[start : start + len(part)] = indices[:, 0].cpu().numpy()
+                first = indices[:, 0].cpu().numpy()
+                nearest[start : start + len(part)] = first
                 assert certified is not None
-                certified[start : start + len(part)] = self._separated(part, best, second)
+                # a second score of inf is certain only where a single point lies outside the row's component (not
+                # after an overflow), and a non-finite best never
+                outside = len(self.points) - np.bincount(host_labels, minlength=len(self.points))[host_labels[part]]
+                finite = np.isfinite(best) & (np.isfinite(second) | ((second == np.inf) & (outside == 1)))
+                certified[start : start + len(part)] = finite & self._separated(part, best, second, first)
             else:
                 nearest[start : start + len(part)] = scores.argmin(1).cpu().numpy()
             del scores  # before the next block's
         return nearest, certified
 
-    def _separated(self, rows: np.ndarray, best: np.ndarray, second: np.ndarray) -> np.ndarray:
+    def _separated(self, rows: np.ndarray, best: np.ndarray, second: np.ndarray, first: np.ndarray) -> np.ndarray:
         """Whether the second best score exceeds the best by more than the scores' error."""
-        if self.manhattan:  # the second is inf where only one point lies outside the component, which is certain
-            return second * (1 - self.relative) > best * (1 + self.relative)
-        return second - best > 2 * self.error[rows]
+        with np.errstate(invalid="ignore"):
+            if self.manhattan:
+                return second * (1 - self.relative) > best * (1 + self.relative)
+            return second - best > 2 * self.errors(rows, best, first)
 
-    def candidates(self, rows: torch.Tensor, labels: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
-        """Pairs (position in rows, point) of the points that can be nearest to the row by W, for a float64 search."""
-        scores = self.scores(rows, labels)
-        best = scores.amin(1, keepdim=True)
+    def candidates(self, rows: np.ndarray, labels: torch.Tensor) -> torch.Tensor:
+        """Mask (rows x points) of the points that can be nearest to each row by W, for a float64 search."""
+        scores = self.scores(torch.as_tensor(rows, device=self.device), labels)
+        best, first = scores.min(1, keepdim=True)
         if self.manhattan:
-            within = scores * (1 - self.relative) <= best * (1 + self.relative)
-        else:
-            within = scores <= best + 2 * self.error_[rows, None]
-        position, point = within.nonzero(as_tuple=True)
-        return position.cpu().numpy(), point.cpu().numpy()
+            return scores * (1 - self.relative) <= best * (1 + self.relative)
+        error = self.errors(rows, best[:, 0].cpu().double().numpy(), first[:, 0].cpu().numpy())
+        return scores <= best + 2 * torch.as_tensor(error, dtype=scores.dtype, device=self.device)[:, None]
 
 
 class _Search(Protocol):
@@ -209,11 +252,21 @@ class _Recheck:
         device_labels = torch.as_tensor(labels, device=self.search.device)
         for start in range(0, len(rows), self.search.block):
             part = rows[start : start + self.search.block]
-            position, point = self.search.candidates(torch.as_tensor(part, device=self.search.device), device_labels)
-            weights = _weights(self.QT, part[position], point, self.manhattan)
-            order = np.lexsort((point, weights, position))  # per row, the least W, then the lowest index
-            first = order[np.r_[True, position[order[1:]] != position[order[:-1]]]]
-            nearest[start + position[first]] = point[first]
+            within = self.search.candidates(part, device_labels)
+            counts = within.sum(1).cpu().numpy()
+            # at most _PAIRS candidate pairs at once (many near-ties, as of a lattice, would make the list large)
+            ends = np.r_[0, np.cumsum(counts)]
+            first_row = 0
+            while first_row < len(part):
+                last = max(first_row + 1, int(np.searchsorted(ends, ends[first_row] + _PAIRS, side="right")) - 1)
+                position, point = within[first_row:last].nonzero(as_tuple=True)
+                position, point = position.cpu().numpy() + first_row, point.cpu().numpy()
+                weights = _weights(self.QT, part[position], point, self.manhattan)
+                order = np.lexsort((point, weights, position))  # per row, the least W, then the lowest index
+                first = order[np.r_[True, position[order[1:]] != position[order[:-1]]]]
+                nearest[start + position[first]] = point[first]
+                first_row = last
+            del within
         return nearest
 
 
@@ -275,7 +328,8 @@ def minimum_spanning_tree(
 
     Borůvka's algorithm with a masked nearest-point search per round, in O(n_points) memory beyond one block of
     batch_size x n_points scores (no n_points x n_points matrix) and at most ceil(log2 n_points) rounds of
-    O(n_points^2 n_features) each, in practice 4-8. With exact, the tree is the unique minimum spanning tree under the
+    O(n_points^2 n_features) each, in practice few (5-6 in the user guide's timings). Exact duplicates are
+    joined first, without a search. With exact, the tree is the unique minimum spanning tree under the
     strict order (distance, lower index, higher index) of the float64 distances of the rows as float32, the same on
     every device (see the user guide). Identical rows are joined by edges of weight 0.
 
@@ -287,7 +341,8 @@ def minimum_spanning_tree(
         ``"euclidean"``, ``"manhattan"``, ``"cosine"`` or ``"correlation"`` (see :class:`SOM`). Under cosine and
         correlation, the tree is that of the euclidean distances of the rows scaled to unit length in float64 (and
         centred over the features, for correlation), with the weights ||a - b||^2 / 2 = 1 - cos(a, b); rows of zero
-        norm (cosine) or constant rows (correlation) have no such distance and raise.
+        norm (cosine) or constant rows (correlation) have no such distance and raise (whereas :meth:`SOM.transform`
+        gives such samples the distance 1 to every node).
     exact
         Whether every row's nearest point in another component is certified, by searching again in float64 the rows
         whose float32 (on the CPU float64) scores do not separate the best two points by more than their rounding
@@ -332,14 +387,28 @@ def minimum_spanning_tree(
         Q = Q / Q.norm(dim=1, keepdim=True)
     if n == 1:
         return SpanningTree(np.zeros((0, 2), np.int64), np.zeros(0), 1)
-    QT = np.ascontiguousarray(Q.numpy().T)
-    search, block = _search(engine, Q, exact), _block(engine, Q)
-    recheck = _Recheck(engine, Q, QT, block) if exact else None
-    edges, squared = _boruvka(n, search, recheck, QT, manhattan)
-    if metric == "euclidean":
-        weights = np.sqrt(squared)
-    else:
-        weights = squared if manhattan else squared / 2
+    # identical rows: the tree joins each to the first of its kind by an edge of weight 0 (as the strict order does),
+    # and the first rows, whose order is that of the rows, by the tree of the distinct rows
+    _, first, inverse = np.unique(Q.numpy(), axis=0, return_index=True, return_inverse=True)
+    distinct = np.sort(first)
+    rank = np.empty(len(first), np.int64)
+    rank[np.argsort(first)] = np.arange(len(first))
+    kind = distinct[rank[inverse.ravel()]]
+    edges, squared = np.zeros((0, 2), np.int64), np.zeros(0)
+    if len(distinct) > 1:
+        engine.n_rows = len(distinct)
+        Q = Q[torch.as_tensor(distinct)]
+        QT = np.ascontiguousarray(Q.numpy().T)
+        search, block = _search(engine, Q, exact), _block(engine, Q)
+        recheck = _Recheck(engine, Q, QT, block) if exact else None
+        edges, squared = _boruvka(len(distinct), search, recheck, QT, manhattan)
+        edges = distinct[edges]
+    copies = np.flatnonzero(kind != np.arange(n))
+    edges = np.concatenate([edges, np.stack([kind[copies], copies], 1)])
+    squared = np.concatenate([squared, np.zeros(len(copies))])
+    order = np.lexsort((edges[:, 1], edges[:, 0], squared))
+    edges, squared = edges[order], squared[order]
+    weights = np.sqrt(squared) if metric == "euclidean" else squared if manhattan else squared / 2
     return SpanningTree(edges, weights, n)
 
 
@@ -371,6 +440,15 @@ class SpanningTree:
             raise ValueError(f"n_nodes must be an integer >= 1, got {self.n_nodes!r}")
         if np.shape(self.edges) != (self.n_nodes - 1, 2) or np.shape(self.weights) != (self.n_nodes - 1,):
             raise ValueError("a spanning tree has n_nodes - 1 edges, of shape (n_nodes - 1, 2), and as many weights")
+        edges = np.asarray(self.edges)
+        if edges.size and (edges.dtype.kind not in "iu" or edges.min() < 0 or edges.max() >= self.n_nodes):
+            raise ValueError(f"edges must be node indices in [0, {self.n_nodes})")
+        parent = np.arange(self.n_nodes)
+        for a, b in edges.tolist():  # n_nodes - 1 edges without a cycle connect all nodes
+            first, second = _find(parent, a), _find(parent, b)
+            if first == second:
+                raise ValueError("the edges contain a cycle, so they are no spanning tree")
+            parent[max(first, second)] = min(first, second)
 
     def degrees(self) -> np.ndarray:
         """Number of edges at every node, shape (n_nodes,), int64."""
@@ -389,7 +467,11 @@ class SpanningTree:
         return self._between(sources, targets, self._rooted[3], np.int32)
 
     def path_lengths(self, sources: ArrayLike, targets: ArrayLike | None = None) -> np.ndarray:
-        """Summed weights of the edges on the path between nodes, float64; shapes as for hops."""
+        """Summed weights of the edges on the path between nodes, float64; shapes as for hops.
+
+        Computed from the distances to node 0, so the absolute error grows with the depth of the tree (about the
+        float64 rounding of the summed weights from the root), not with the path's own length.
+        """
         return np.maximum(self._between(sources, targets, self._rooted[4], np.float64), 0)
 
     def labels(self, n_clusters: int | None = None, distance_threshold: float | None = None) -> np.ndarray:
@@ -406,6 +488,8 @@ class SpanningTree:
                 raise ValueError(f"n_clusters must be an integer in [1, {self.n_nodes}], got {n_clusters!r}")
             kept = np.asarray(self.edges)[: self.n_nodes - n_clusters]
         else:
+            if np.isnan(distance_threshold):
+                raise ValueError("distance_threshold must not be nan")
             kept = np.asarray(self.edges)[np.asarray(self.weights) < distance_threshold]
         parent = np.arange(self.n_nodes)
         for a, b in kept.tolist():
@@ -449,6 +533,8 @@ class SpanningTree:
 
     def _nodes(self, nodes: ArrayLike, name: str) -> np.ndarray:
         array = np.asarray(nodes)
+        if array.size == 0 and array.ndim == 1:
+            return np.zeros(0, np.int64)
         if array.ndim > 1 or array.dtype.kind not in "iu" or ((array < 0) | (array >= self.n_nodes)).any():
             raise ValueError(f"{name} must be node indices in [0, {self.n_nodes}), got {nodes!r}")
         return array.astype(np.int64)

@@ -352,7 +352,9 @@ class KMeans:
         return distances.numpy()
 
     def minimum_spanning_tree(self, exact: bool = True) -> "SpanningTree":
-        """Minimum spanning tree of the centroids in the metric, on the device and with the batch size of the model.
+        """Minimum spanning tree of the centroids in the metric, on the device of the model.
+
+        The tree's search sizes its own blocks for the number of centroids, not by the model's batch_size.
 
         See :func:`fastersom.minimum_spanning_tree`; the centroids are numbered as in ``cluster_centers_``.
         """
@@ -364,7 +366,6 @@ class KMeans:
             self.metric,
             exact=exact,
             device=engine._device,
-            batch_size=self.batch_size,
             memory_fraction=self.memory_fraction,
         )
 

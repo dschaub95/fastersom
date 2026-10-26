@@ -166,7 +166,9 @@ def test_certification_rechecks_near_ties_of_float32(monkeypatch):
     assert_tree_equal(minimum_spanning_tree(X, device="cpu"), *expected)
     assert 0 < sum(rechecked) < 3 * len(X)
     # without the certification the float32 choices give another tree, so the test above is not vacuous
-    monkeypatch.setattr(_mst._TorchSearch, "_separated", lambda self, rows, best, second: np.ones(len(rows), bool))
+    monkeypatch.setattr(
+        _mst._TorchSearch, "_separated", lambda self, rows, best, second, first: np.ones(len(rows), bool)
+    )
     uncertified = minimum_spanning_tree(X, device="cpu")
     assert not np.array_equal(uncertified.edges, expected[0])
     assert uncertified.weights.sum() == pytest.approx(expected[1].sum(), rel=1e-6)
@@ -334,9 +336,10 @@ def test_tree_validation():
         SpanningTree(np.array([[0, 1]]), np.ones(1), 3)
     with pytest.raises(ValueError, match="n_nodes must be"):
         SpanningTree(np.zeros((0, 2)), np.zeros(0), 0)
-    cycle = SpanningTree(np.array([[0, 1], [1, 0], [2, 3]]), np.ones(3), 4)
-    with pytest.raises(ValueError, match="no spanning tree"):
-        cycle.hops(0)
+    with pytest.raises(ValueError, match="cycle"):
+        SpanningTree(np.array([[0, 1], [1, 0], [2, 3]]), np.ones(3), 4)
+    with pytest.raises(ValueError, match="node indices"):
+        SpanningTree(np.array([[0, 1], [1, 4]]), np.ones(2), 3)
     tree = minimum_spanning_tree(points("gaussian"), device="cpu")
     with pytest.raises(ValueError, match="exactly one"):
         tree.labels()
@@ -348,6 +351,9 @@ def test_tree_validation():
         tree.hops([0, 500])
     with pytest.raises(ValueError, match="targets must be node indices"):
         tree.path_lengths(0, [0.5])
+    with pytest.raises(ValueError, match="nan"):
+        tree.labels(distance_threshold=np.nan)
+    assert tree.hops([]).shape == (0, 500)
 
 
 @pytest.mark.parametrize("metric", ["euclidean", "cosine"])
@@ -370,3 +376,68 @@ def test_methods_of_fitted_models(metric):
         SOM(3, 3).minimum_spanning_tree()
     with pytest.raises(RuntimeError, match="not fitted"):
         KMeans(3).minimum_spanning_tree()
+
+
+def float32_search(monkeypatch):
+    """The GPUs' float32 search, on the CPU; returns the list of the rows rechecked per round."""
+    monkeypatch.setattr(_mst, "_search_dtype", lambda device, exact: torch.float32)
+    rechecked = []
+    recheck = _mst._Recheck.__call__
+    monkeypatch.setattr(
+        _mst._Recheck, "__call__", lambda self, rows, labels: rechecked.append(len(rows)) or recheck(self, rows, labels)
+    )
+    return rechecked
+
+
+def test_outliers_do_not_loosen_every_rows_bound(monkeypatch):
+    X = points("mixture")
+    X[7] = 1e6  # one point far from all others
+    rechecked = float32_search(monkeypatch)
+    assert_tree_equal(minimum_spanning_tree(X, device="cpu"), *reference(X))
+    assert sum(rechecked) < 0.2 * len(X)  # with one bound for all rows, every row of every round
+
+
+def test_long_tailed_rows(monkeypatch):
+    X = np.random.default_rng(3).lognormal(0, 2.5, size=(600, 8)).astype(np.float32)
+    rechecked = float32_search(monkeypatch)
+    assert_tree_equal(minimum_spanning_tree(X, device="cpu"), *reference(X))
+    assert sum(rechecked) < len(X)
+
+
+def test_overflowing_float32_scores_are_rechecked(monkeypatch):
+    X = np.random.default_rng(4).normal(size=(200, 5)).astype(np.float32) * np.float32(1e20)
+    float32_search(monkeypatch)
+    tree = minimum_spanning_tree(X, device="cpu")
+    expected = reference(X)
+    np.testing.assert_array_equal(tree.edges, expected[0])
+
+
+def test_duplicates_are_joined_without_a_search(monkeypatch):
+    rng = np.random.default_rng(5)
+    X = np.repeat(rng.normal(size=(5, 4)).astype(np.float32), 400, axis=0)[rng.permutation(2000)]
+    searched = []
+    nearest = _mst._TorchSearch.nearest
+    monkeypatch.setattr(
+        _mst._TorchSearch,
+        "nearest",
+        lambda self, rows, *args, **kwargs: searched.append(len(self.points)) or nearest(self, rows, *args, **kwargs),
+    )
+    tree = minimum_spanning_tree(X, device="cpu")
+    assert_tree_equal(tree, *reference(X))
+    assert max(searched) == 5
+    assert (tree.weights == 0).sum() == 1995
+
+
+def test_unit_roundoff_under_the_per_backend_precision_api(monkeypatch):
+    def legacy():
+        raise RuntimeError("mix of the legacy and new APIs")
+
+    monkeypatch.setattr(torch, "get_float32_matmul_precision", legacy)
+    for device in ("cpu", "cuda", "mps"):
+        assert _mst._unit_roundoff(torch.float32, torch.device(device), matmul=True) in (2.0**-24, 2.0**-11, 2.0**-8)
+    assert _mst._unit_roundoff(torch.float64, torch.device("cpu"), matmul=True) == 2.0**-53
+
+
+def test_methods_do_not_take_the_models_batch_size():
+    som = SOM(10, 10, n_epochs=2, random_state=0, device="cpu", batch_size=2**16).fit(blobs())
+    assert_tree_equal(som.minimum_spanning_tree(), *reference(som.weights_))

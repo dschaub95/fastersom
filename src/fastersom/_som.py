@@ -1006,7 +1006,9 @@ class SOM:
         return total.cpu().numpy()
 
     def minimum_spanning_tree(self, exact: bool = True) -> "SpanningTree":
-        """Minimum spanning tree of the nodes in the metric, on the device and with the batch size of the map.
+        """Minimum spanning tree of the nodes in the metric, on the device of the map.
+
+        The tree's search sizes its own blocks for the number of nodes, not by the map's batch_size.
 
         See :func:`fastersom.minimum_spanning_tree`; the nodes are numbered as in ``weights_``.
         """
@@ -1018,7 +1020,6 @@ class SOM:
             self.metric,
             exact=exact,
             device=self._device,
-            batch_size=self.batch_size,
             memory_fraction=self.memory_fraction,
         )
 

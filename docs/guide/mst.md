@@ -57,7 +57,13 @@ nearest row is chosen among all whose scores lie within that bound of the best. 
 maps or centroids need this (none in the timings below), in float32 about 1-7% in the first round (in tests on the
 CPU); on near-ties, such as an untrained grid or rows on a lattice, most rows do, which costs up to about one more
 float64 search per round. On MPS, which has no float64, these searches run on the CPU. Where torch may compute float32
-matrix products in TF32 or bfloat16 (see {func}`torch.set_float32_matmul_precision`), the bound widens accordingly.
+matrix products in TF32 or bfloat16 (see {func}`torch.set_float32_matmul_precision` and the per-backend
+`fp32_precision` settings), the bound widens accordingly.
+
+Each row's bound depends on its own length and on a radius fitted to its best score, beyond which no row can be its
+nearest, so a few rows far from the others (outliers, or a long tail of intensities) do not loosen the bound of every
+other row; only the far rows themselves may need the float64 search. Exact duplicates are joined before the search and
+add neither searches nor candidates; a float64 search holds at most $2^{22}$ candidate pairs at once.
 
 `exact=False` takes the search's choices as they are, in float32 on every device. Near-tied edges can then differ from
 the exact tree, which gives a spanning tree of nearly the same total distance (within $10^{-6}$ in the tests), on the
