@@ -263,8 +263,9 @@ class KMeans:
         """Give each empty centroid one of the samples farthest from their centroid, taken from that centroid's sums."""
         labels, distances = engine._bmus(data, centroids)
         assert distances is not None
-        distances = torch.nan_to_num(distances, nan=-1.0)  # samples without a centroid are never taken
-        far = distances.topk(min(len(empty), len(data))).indices
+        # only samples with a centroid, which may be fewer than the empty centroids; those left over stay empty
+        candidates = (labels >= 0).nonzero()[:, 0]
+        far = candidates[distances[candidates].topk(min(len(empty), len(candidates))).indices]
         values = data[far] if transform is None else transform(data[far])
         sums, counts = sums.clone(), counts.clone()
         for cluster, sample, value in zip(empty.tolist(), far.tolist(), values, strict=False):

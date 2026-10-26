@@ -171,3 +171,10 @@ def test_gpu_matches_cpu(data, device, metric, deterministic):
     gpu = KMeans(6, init=init, metric=metric, max_iter=20, device=device, deterministic=deterministic).fit(data)
     np.testing.assert_allclose(gpu.cluster_centers_, cpu.cluster_centers_, rtol=1e-4, atol=1e-4)
     assert (gpu.labels_ == cpu.labels_).mean() > 0.999
+
+
+def test_empty_clusters_take_only_samples_with_a_centroid():
+    X = np.zeros((10, 3), dtype=np.float32)
+    X[0] = [1, 0, 0]  # the only sample with a centroid under cosine; two centroids get none
+    centroids = KMeans(3, init=np.eye(3, dtype=np.float32), metric="cosine", max_iter=1, device="cpu").fit(X)
+    np.testing.assert_array_equal(centroids.cluster_centers_, [[1, 0, 0], [1, 0, 0], [0, 0, 1]])
