@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-10-26)
 
 - Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose
   documentation tools need 3.12.
