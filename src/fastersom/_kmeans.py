@@ -47,6 +47,11 @@ class KMeans:
         ``"keep"`` leaves it where it is (as cuML does).
     n_local_trials
         Candidates per centroid of k-means++. Defaults to 2 + int(log(n_clusters)), as in scikit-learn.
+    init_size
+        Samples that k-means++ seeds on: a random subset of this many, all samples if there are fewer. Seeding reads
+        them once per centroid, so its cost grows with init_size x n_clusters x n_local_trials; on all samples it would
+        take hours for 10^4 centroids of millions of samples, while the iterations that follow work on all of them.
+        Defaults to max(100_000, 10 x n_clusters).
     compute_labels
         Whether fit also assigns the samples to the final centroids, for ``labels_`` and ``inertia_``: one more pass
         over the samples, which a fit for the centroids alone does not need.
@@ -82,6 +87,7 @@ class KMeans:
         metric: str = "euclidean",
         empty_clusters: str = "farthest",
         n_local_trials: int | None = None,
+        init_size: int | None = None,
         compute_labels: bool = True,
         random_state: int | None = None,
         device: str | torch.device | None = None,
@@ -98,6 +104,7 @@ class KMeans:
         self.metric = metric
         self.empty_clusters = empty_clusters
         self.n_local_trials = n_local_trials
+        self.init_size = init_size
         self.compute_labels = compute_labels
         self.random_state = random_state
         self.device = device
@@ -154,6 +161,12 @@ class KMeans:
         if self.init == "random":
             rows = rng.choice(len(candidates), self.n_clusters, replace=False)
             return candidates[torch.as_tensor(rows, device=data.device)].clone()
+        size = self.init_size if self.init_size is not None else max(100_000, 10 * self.n_clusters)
+        if not isinstance(size, int) or isinstance(size, bool) or size < self.n_clusters:
+            raise ValueError(f"init_size must be an integer >= n_clusters, got {size!r}")
+        if len(candidates) > size:
+            rows = np.sort(rng.choice(len(candidates), size, replace=False))
+            candidates = candidates[torch.as_tensor(rows, device=data.device)]
         return self._kmeans_plus_plus(engine, candidates, rng)
 
     def _kmeans_plus_plus(self, engine: SOM, data: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
@@ -170,22 +183,28 @@ class KMeans:
                 out.append((batch[:, None, :] - centres[None]).square_().sum(2))
             return torch.cat(out)
 
-        chosen = [int(rng.integers(len(data)))]
-        centres = [compared(data[chosen[0] : chosen[0] + 1])[0]]
-        closest = squared(centres[0][None])[:, 0]
-        for _ in range(1, self.n_clusters):
-            cumulative = closest.double().cumsum(0) if closest.device.type != "mps" else closest.cumsum(0)
-            draws = torch.as_tensor(rng.uniform(size=trials), dtype=cumulative.dtype, device=cumulative.device)
-            rows = torch.searchsorted(cumulative, draws * cumulative[-1]).clamp_(max=len(data) - 1)
+        # every draw up front and the choices kept on the device, so that the loop never waits for the device
+        first = int(rng.integers(len(data)))
+        uniform = rng.uniform(size=(self.n_clusters - 1, trials))
+        closest = squared(compared(data[first : first + 1]))[:, 0]
+        exact = closest.device.type != "mps"  # float64 sums where the device has them
+        draws = torch.as_tensor(uniform, dtype=torch.float64 if exact else closest.dtype, device=closest.device)
+        chosen = torch.empty(self.n_clusters, dtype=torch.long, device=data.device)
+        chosen[0] = first
+        centres = compared(data[first : first + 1]).new_empty(self.n_clusters, data.shape[1])
+        centres[0] = compared(data[first : first + 1])[0]
+        for k in range(1, self.n_clusters):
+            cumulative = closest.double().cumsum(0) if exact else closest.cumsum(0)
+            rows = torch.searchsorted(cumulative, draws[k - 1] * cumulative[-1]).clamp_(max=len(data) - 1)
             candidates = compared(data[rows])
             potentials = torch.minimum(closest[:, None], squared(candidates))
-            best = int(potentials.sum(0).argmin())
-            closest = potentials[:, best].contiguous()
-            chosen.append(int(rows[best]))
-            centres.append(candidates[best])
+            best = potentials.sum(0).argmin()
+            closest = potentials.index_select(1, best[None])[:, 0].contiguous()
+            chosen[k] = rows[best]
+            centres[k] = candidates[best]
         if self.metric == "euclidean":  # the samples themselves; else their compared form, the centroids' directions
-            return data[torch.as_tensor(chosen, device=data.device)].clone()
-        return torch.stack(centres)
+            return data[chosen].clone()
+        return centres
 
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "KMeans":
         """Fit the centroids, starting from the initialisation given by init.
