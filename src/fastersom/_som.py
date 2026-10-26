@@ -51,8 +51,10 @@ _FUSED_MAX_FEATURES = 128
 _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
-# samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu)
+# samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu), and their largest number of values: each
+# part is copied by the metric's transform and by the selection of the samples with a BMU, 64 MB per copy at most
 _CPU_SUM_ROWS = 1 << 20
+_CPU_SUM_VALUES = 1 << 24
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
 # with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
@@ -755,13 +757,13 @@ class SOM:
         Per-node sums (float32) and counts of the samples assigned by search, the samples transformed by transform
         before they are added; samples without a BMU add nothing.
         """
+        if data.device.type == "cpu" and not summing["deterministic"]:
+            return self._sums_cpu(data, search, n_nodes, batch_size, transform)
         fixed_point, mps = summing["fixed_point"], summing["mps"]
         sums = data.new_zeros((n_nodes, data.shape[1]), dtype=torch.long if fixed_point else torch.float32)
         lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
         # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
         counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=data.device)
-        if data.device.type == "cpu" and not summing["deterministic"]:
-            return self._sums_cpu(data, search, n_nodes, batch_size, transform)
         for batch in data.split(batch_size):
             bmus = search(batch)
             keep = self._has_bmu(batch)
@@ -805,14 +807,16 @@ class SOM:
         batch_size: int,
         transform: Callable[[torch.Tensor], torch.Tensor] | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sum the samples per node on the CPU, in parts of _CPU_SUM_ROWS samples.
+        """Sum the samples per node on the CPU, in parts of up to _CPU_SUM_ROWS samples and _CPU_SUM_VALUES values.
 
         As _sums, but each part's BMUs are found batch by batch and its samples added in one index_add_: on the CPU,
         index_add_ spreads over the threads only for many rows, and adding batch by batch takes several times as long.
+        A part is at least one batch, whose copies the BMU search makes anyway.
         """
         sums = data.new_zeros((n_nodes, data.shape[1]))
-        counts = torch.zeros(n_nodes, dtype=torch.long)
-        for part in data.split(_CPU_SUM_ROWS):
+        counts = torch.zeros(n_nodes, dtype=torch.long, device=data.device)
+        rows = max(batch_size, min(_CPU_SUM_ROWS, _CPU_SUM_VALUES // data.shape[1]))
+        for part in data.split(rows):
             bmus = torch.cat([search(batch) for batch in part.split(batch_size)])
             keep = self._has_bmu(part)
             values = part if transform is None else transform(part)
