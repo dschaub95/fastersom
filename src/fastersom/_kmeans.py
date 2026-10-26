@@ -170,41 +170,41 @@ class KMeans:
         return self._kmeans_plus_plus(engine, candidates, rng)
 
     def _kmeans_plus_plus(self, engine: SOM, data: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
-        """Greedy k-means++ on the samples as the metric compares them (squared euclidean distances)."""
+        """Greedy k-means++ on the samples as the metric compares them (squared euclidean distances).
+
+        The distances are ||x - m||^2 + ||c - m||^2 - 2 (x - m).(c - m) by a matmul, with m the mean sample so that a
+        large offset does not cancel, and x.(c - m) taken from the samples as they are, without a centred copy.
+        """
         trials = self.n_local_trials if self.n_local_trials is not None else 2 + int(log(self.n_clusters))
-        compared = engine._compared
-        batch_size = max(1, (1 << 24) // max(trials, 1) // data.shape[1])
+        batch_size = max(1, (1 << 24) // data.shape[1])
+        if self.metric != "euclidean":  # unit rows, compared once rather than at every centroid
+            data = torch.cat([engine._compared(batch) for batch in data.split(batch_size)])
+        mean = data.mean(0)
+        norms = torch.cat([(batch - mean).square_().sum(1) for batch in data.split(batch_size)])
 
         def squared(centres: torch.Tensor) -> torch.Tensor:
             """Squared distance of every sample to each of the centres, shape (n_samples, len(centres))."""
-            out = []
-            for batch in data.split(batch_size):
-                batch = compared(batch)
-                out.append((batch[:, None, :] - centres[None]).square_().sum(2))
-            return torch.cat(out)
+            shifted = centres - mean
+            bias = shifted.square().sum(1) + 2 * (shifted @ mean)
+            return torch.addmm(bias, data, shifted.T, alpha=-2).add_(norms[:, None]).clamp_min_(0)
 
         # every draw up front and the choices kept on the device, so that the loop never waits for the device
         first = int(rng.integers(len(data)))
         uniform = rng.uniform(size=(self.n_clusters - 1, trials))
-        closest = squared(compared(data[first : first + 1]))[:, 0]
+        closest = squared(data[first : first + 1])[:, 0]
         exact = closest.device.type != "mps"  # float64 sums where the device has them
         draws = torch.as_tensor(uniform, dtype=torch.float64 if exact else closest.dtype, device=closest.device)
         chosen = torch.empty(self.n_clusters, dtype=torch.long, device=data.device)
         chosen[0] = first
-        centres = compared(data[first : first + 1]).new_empty(self.n_clusters, data.shape[1])
-        centres[0] = compared(data[first : first + 1])[0]
         for k in range(1, self.n_clusters):
             cumulative = closest.double().cumsum(0) if exact else closest.cumsum(0)
             rows = torch.searchsorted(cumulative, draws[k - 1] * cumulative[-1]).clamp_(max=len(data) - 1)
-            candidates = compared(data[rows])
-            potentials = torch.minimum(closest[:, None], squared(candidates))
+            potentials = torch.minimum(closest[:, None], squared(data[rows]))
             best = potentials.sum(0).argmin()
             closest = potentials.index_select(1, best[None])[:, 0].contiguous()
             chosen[k] = rows[best]
-            centres[k] = candidates[best]
-        if self.metric == "euclidean":  # the samples themselves; else their compared form, the centroids' directions
-            return data[chosen].clone()
-        return centres
+        # the samples themselves (euclidean), else their compared form, the centroids' directions
+        return data[chosen].clone()
 
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "KMeans":
         """Fit the centroids, starting from the initialisation given by init.
