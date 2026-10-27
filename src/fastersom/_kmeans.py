@@ -193,17 +193,16 @@ class KMeans:
         closest = squared(centred[first : first + 1])[:, 0]
         exact = closest.device.type != "mps"  # float64 sums where the device has them
         draws = torch.as_tensor(uniform, dtype=torch.float64 if exact else closest.dtype, device=closest.device)
-        chosen = torch.empty(self.n_clusters, dtype=torch.long, device=data.device)
-        chosen[0] = first
+        chosen = [torch.full((1,), first, dtype=torch.long, device=data.device)]
         for k in range(1, self.n_clusters):
             cumulative = closest.double().cumsum(0) if exact else closest.cumsum(0)
             rows = torch.searchsorted(cumulative, draws[k - 1] * cumulative[-1]).clamp_(max=len(data) - 1)
-            potentials = torch.minimum(closest[:, None], squared(centred[rows]))
-            best = potentials.sum(0).argmin()
-            closest = potentials.index_select(1, best[None])[:, 0].contiguous()
-            chosen[k] = rows[best]
+            potentials = torch.minimum(closest[:, None], squared(centred.index_select(0, rows)))
+            best = potentials.sum(0).argmin(0, keepdim=True)  # indexing with a 0-d tensor would wait for its value
+            closest = potentials.index_select(1, best)[:, 0].contiguous()
+            chosen.append(rows.index_select(0, best))
         # the samples themselves (euclidean), else their compared form, the centroids' directions
-        return data[chosen].clone()
+        return data.index_select(0, torch.cat(chosen))
 
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "KMeans":
         """Fit the centroids, starting from the initialisation given by init.
