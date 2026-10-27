@@ -120,6 +120,14 @@ def test_kmeans_plus_plus_is_seeded_and_picks_samples(data):
     assert len({tuple(row) for row in first.tolist()}) == 6
 
 
+def test_kmeans_plus_plus_at_a_large_offset():
+    X = np.array([[1e7], [1e7 + 1], [1e7 + 2]], dtype=np.float32)  # distances 1 and 4, which a raw product cancels
+    model = KMeans(3, random_state=2, device="cpu")
+    engine = model._engine()
+    centroids = model._initial_centroids(engine, engine._check_X(X))
+    assert sorted(centroids[:, 0].tolist()) == X[:, 0].tolist()
+
+
 def _engine_and_data(data):
     model = KMeans(6, device="cpu")
     engine = model._engine()
