@@ -153,21 +153,28 @@ class KMeans:
             if not torch.isfinite(centroids).all():
                 raise ValueError("init contains NaN or infinite values")
             return centroids.clone()
+        # the indices of the samples with a centroid (None for all), of which only those drawn are copied
         has_bmu = engine._has_bmu(data)
-        candidates = data if has_bmu is None else data[has_bmu]
-        if len(candidates) < self.n_clusters:
+        candidates = None if has_bmu is None else has_bmu.nonzero()[:, 0]
+        n_candidates = len(data) if candidates is None else len(candidates)
+        if n_candidates < self.n_clusters:
             raise ValueError(f"n_clusters={self.n_clusters} needs as many samples with a nearest centroid")
+
+        def samples(rows: np.ndarray) -> torch.Tensor:
+            index = torch.as_tensor(rows, device=data.device)
+            return data[index if candidates is None else candidates[index]]
+
         rng = np.random.default_rng(self.random_state)
         if self.init == "random":
-            rows = rng.choice(len(candidates), self.n_clusters, replace=False)
-            return candidates[torch.as_tensor(rows, device=data.device)].clone()
+            return samples(rng.choice(n_candidates, self.n_clusters, replace=False))
         size = self.init_size if self.init_size is not None else max(100_000, 10 * self.n_clusters)
         if not isinstance(size, int) or isinstance(size, bool) or size < self.n_clusters:
             raise ValueError(f"init_size must be an integer >= n_clusters, got {size!r}")
-        if len(candidates) > size:
-            rows = np.sort(rng.choice(len(candidates), size, replace=False))
-            candidates = candidates[torch.as_tensor(rows, device=data.device)]
-        return self._kmeans_plus_plus(engine, candidates, rng)
+        if n_candidates > size:
+            subset = samples(np.sort(rng.choice(n_candidates, size, replace=False)))
+        else:
+            subset = data if candidates is None else data[candidates]
+        return self._kmeans_plus_plus(engine, subset, rng)
 
     def _kmeans_plus_plus(self, engine: SOM, data: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
         """Greedy k-means++ on the samples as the metric compares them (squared euclidean distances).
