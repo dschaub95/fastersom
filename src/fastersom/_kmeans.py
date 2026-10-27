@@ -182,13 +182,16 @@ class KMeans:
         """Greedy k-means++ on the samples as the metric compares them (squared euclidean distances).
 
         The distances are ||x - m||^2 + ||c - m||^2 - 2 (x - m).(c - m) by a matmul of the samples centred once on
-        their mean m (a copy of at most init_size rows), so that a large offset does not cancel.
+        their mean m (a copy of at most init_size rows, the compared copy itself under cosine and correlation), so
+        that a large offset does not cancel.
         """
         trials = self.n_local_trials if self.n_local_trials is not None else 2 + int(log(self.n_clusters))
         batch_size = max(1, (1 << 24) // data.shape[1])
-        if self.metric != "euclidean":  # unit rows, compared once rather than at every centroid
-            data = torch.cat([engine._compared(batch) for batch in data.split(batch_size)])
-        centred = data - data.mean(0)
+        if self.metric == "euclidean":
+            centred = data - data.mean(0)
+        else:  # unit rows, compared once rather than at every centroid, and centred in place in that copy
+            centred = torch.cat([engine._compared(batch) for batch in data.split(batch_size)])
+            centred -= centred.mean(0)
         norms = torch.cat([batch.square().sum(1) for batch in centred.split(batch_size)])
 
         def squared(centres: torch.Tensor) -> torch.Tensor:
@@ -211,7 +214,8 @@ class KMeans:
             closest = potentials.index_select(1, best)[:, 0].contiguous()
             chosen.append(rows.index_select(0, best))
         # the samples themselves (euclidean), else their compared form, the centroids' directions
-        return data.index_select(0, torch.cat(chosen))
+        samples = data.index_select(0, torch.cat(chosen))
+        return samples if self.metric == "euclidean" else engine._compared(samples)
 
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "KMeans":
         """Fit the centroids, starting from the initialisation given by init.
