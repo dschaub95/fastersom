@@ -254,8 +254,8 @@ class KMeans:
             centre = mean.float().to(engine._device)
             # deviations from the mean are summed if it lies beyond the range of a feature, so that a large offset does
             # not round the sums; within it the samples' sums round at most about twice as much, and spare a pass over
-            # the samples per iteration (5% of an iteration on an A100 and 10% on the CPU, at 32 features and 100
-            # centroids)
+            # the samples per iteration (up to 5% of an iteration on an A100 at 10^6 x 32, 17% on the CPU at 200,000 x
+            # 32 and 100 centroids, none at 1000)
             if bool((centre.abs() > high - low).any()):
                 origin = centre
                 low, high = low - origin, high - origin  # as transform rounds them
