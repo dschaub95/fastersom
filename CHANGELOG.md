@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose
-  documentation tools need 3.12.
 - `KMeans`: k-means clustering (Lloyd's algorithm) with the nearest-node search and summation of `SOM`, including the
   fused kernels on CUDA and MPS and `deterministic`. Greedy k-means++ initialisation as in scikit-learn (or random
   samples, or given centroids), scikit-learn's convergence criterion, empty clusters moved to the farthest samples as in
@@ -19,6 +17,11 @@
   an M3 Max, an epoch takes half as long at 10 x 10 nodes (25.5 to 12.9 ms), a quarter less at 22 x 22 and about as
   long at 71 x 71, where the matrix product dominates; a k-means iteration with 500 centroids a third less. Sums now add
   in another order, which changes results only by float rounding.
+
+## 0.6.0 (2026-10-26)
+
+- Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose
+  documentation tools need 3.12.
 - `sigma_final` defaults to `min(0.1 * sigma_initial, 1)` instead of `0.1 * sigma_initial`: the final neighbourhood is
   at most one grid unit wide. With the old default, which XPySom uses, a large map ended training with a neighbourhood
   of several units (2.5 at 100 x 100 nodes, 5 at 200 x 200) and was smoothed beyond the resolution of its nodes. On
