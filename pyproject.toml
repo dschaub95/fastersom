@@ -53,6 +53,7 @@ dev = [
 test = [
   "coverage>=7.10",
   "pytest",
+  "scikit-learn>=1.3", # reference for KMeans
 ]
 doc = [
   "ipykernel",
@@ -152,8 +153,8 @@ lint.pydocstyle.convention = "numpy"
 
 [tool.mypy]
 files = [ "src", "tests" ]
-# Triton is only installed with CUDA builds of torch on Linux
-overrides = [ { module = [ "triton", "triton.*" ], ignore_missing_imports = true } ]
+# Triton is only installed with CUDA builds of torch on Linux; scipy, optional for SpanningTree.to_sparse, has no types
+overrides = [ { module = [ "scipy", "scipy.*", "triton", "triton.*" ], ignore_missing_imports = true } ]
 
 [tool.pytest]
 addopts = [
