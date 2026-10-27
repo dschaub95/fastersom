@@ -181,6 +181,17 @@ def test_gpu_matches_cpu(data, device, metric, deterministic):
     assert (gpu.labels_ == cpu.labels_).mean() > 0.999
 
 
+@pytest.mark.parametrize("device", ["cpu", *GPUS])
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_lloyd_at_a_large_offset(device, deterministic):
+    # float32 sums of the raw samples round to about 2^-24 of 1000 x 1e7, which put the centroid at 9999971
+    X = np.full((1000, 2), 1e7, dtype=np.float32)
+    X[500:, 1] += 4
+    fitted = KMeans(1, device=device, deterministic=deterministic).fit(X)
+    np.testing.assert_array_equal(fitted.cluster_centers_, [[1e7, 1e7 + 2]])
+    assert fitted.inertia_ == pytest.approx(4000)
+
+
 def test_empty_clusters_take_only_samples_with_a_centroid():
     X = np.zeros((10, 3), dtype=np.float32)
     X[0] = [1, 0, 0]  # the only sample with a centroid under cosine; two centroids get none

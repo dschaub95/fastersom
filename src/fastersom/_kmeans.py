@@ -233,21 +233,42 @@ class KMeans:
         engine = self._engine()
         data = engine._check_X(X)
         centroids = self._initial_centroids(engine, data)
-        transform: Callable[[torch.Tensor], torch.Tensor] | None = (
-            None if self.metric == "euclidean" else engine._compared
-        )
         deterministic = engine._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
-        magnitude = None
-        if deterministic:  # the largest |x| per feature of the values summed: unit rows under cosine and correlation
-            magnitude = (
-                torch.maximum(data.amax(0), -data.amin(0)) if transform is None else data.new_ones(data.shape[1])
-            )
         kernel = engine._kernel(data.shape[1])
         batch_size = engine._batch_size_for(data, kernel)
+        euclidean = self.metric == "euclidean"
+        # the mean of the values summed (of the samples with a centroid), for tol and as the origin of the sums
+        mean, n_samples = engine._mean(data, batch_size) if self.tol or euclidean else (None, 0)
+        threshold = self.tol * self._feature_variance(engine, data, batch_size, mean, n_samples) if self.tol else 0.0
+        transform: Callable[[torch.Tensor], torch.Tensor] | None = None if euclidean else engine._compared
+        origin = None
+        if euclidean:
+            assert mean is not None
+            low, high = torch.aminmax(data, dim=0)
+            centre = mean.float().to(engine._device)
+            # deviations from the mean are summed if it lies beyond the range of a feature, so that a large offset does
+            # not round the sums; within it the samples' sums round at most about twice as much, and spare a pass over
+            # the samples per iteration (5% of an iteration on an A100 and 10% on the CPU, at 32 features and 100
+            # centroids)
+            if bool((centre.abs() > high - low).any()):
+                origin = centre
+                low, high = low - origin, high - origin  # as transform rounds them
+                # into one buffer, which each caller reads before the next call: on the CPU a fresh copy of a part of
+                # 2^20 samples costs more in page faults than its sums (36 vs 22 ms at 2^20 x 32)
+                buffer = data.new_empty(0)
+
+                def transform(batch: torch.Tensor) -> torch.Tensor:
+                    nonlocal buffer
+                    if len(buffer) < len(batch):
+                        buffer = torch.empty_like(batch)
+                    return torch.sub(batch, centre, out=buffer[: len(batch)])
+
+        magnitude = None
+        if deterministic:  # the largest |x| per feature of the values summed: unit rows under cosine and correlation
+            magnitude = torch.maximum(high, -low) if euclidean else data.new_ones(data.shape[1])
         summing = engine._summing(len(data), kernel, deterministic, magnitude)
-        threshold = self.tol * self._feature_variance(engine, data, batch_size) if self.tol else 0.0
         self.n_iter_ = 0
         for _ in tqdm(range(self.max_iter), desc="Fitting k-means", unit="iteration", disable=not self.verbose):
             search = engine._search(centroids, kernel)
@@ -255,7 +276,8 @@ class KMeans:
             empty = (counts == 0).nonzero()[:, 0]
             if self.empty_clusters == "farthest" and len(empty):
                 sums, counts = self._relocate(engine, data, centroids, sums, counts, empty, transform)
-            moved = torch.where(counts[:, None] > 0, sums / counts[:, None].clamp_min(1), centroids)
+            means = sums / counts[:, None].clamp_min(1)
+            moved = torch.where(counts[:, None] > 0, means if origin is None else means + origin, centroids)
             shift = float((moved - centroids).square().sum())
             centroids = moved
             self.n_iter_ += 1
@@ -302,13 +324,15 @@ class KMeans:
         return sums, counts
 
     @staticmethod
-    def _feature_variance(engine: SOM, data: torch.Tensor, batch_size: int) -> float:
+    def _feature_variance(
+        engine: SOM, data: torch.Tensor, batch_size: int, mean: torch.Tensor | None, n_samples: int
+    ) -> float:
         """The mean over the features of the variance of the values summed (of the samples with a centroid).
 
-        In two passes as for the covariance of :meth:`SOM._pca_weights`, by :meth:`SOM._scatter`.
+        About their mean and over their number from :meth:`SOM._mean`, by :meth:`SOM._scatter` as for the covariance
+        of :meth:`SOM._pca_weights`.
         """
-        mean, n_samples = engine._mean(data, batch_size)
-        if n_samples == 0:
+        if mean is None or n_samples == 0:
             return 0.0
         return float((engine._scatter(data, batch_size, mean, n_samples, full=False) / n_samples).mean())
 

@@ -8,6 +8,8 @@
   scikit-learn (or kept, `empty_clusters="keep"`), and spherical k-means under cosine and correlation. From the same
   initial centroids, centroids, labels and the number of iterations match scikit-learn's `KMeans(algorithm="lloyd")` on
   the CPU. `compute_labels=False` skips the pass for `labels_` and `inertia_` when only the centroids are needed.
+  k-means++ seeds on the samples centred on their mean, and the centroids are summed about it when it lies beyond the
+  range of a feature, so that a large offset (such as 1e7) does not cancel or round away in float32.
 - `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
   components, centred at the mean, with the longer side of the map along the first component and each side spanning one
   standard deviation of its component; under cosine and correlation of the samples as these metrics compare them.
