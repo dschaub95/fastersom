@@ -305,20 +305,12 @@ class KMeans:
     def _feature_variance(engine: SOM, data: torch.Tensor, batch_size: int) -> float:
         """The mean over the features of the variance of the values summed (of the samples with a centroid).
 
-        In two passes as for the covariance of :meth:`SOM._pca_weights`: about the mean of :meth:`SOM._mean`, less the
-        part due to its rounding to float32.
+        In two passes as for the covariance of :meth:`SOM._pca_weights`, by :meth:`SOM._scatter`.
         """
         mean, n_samples = engine._mean(data, batch_size)
         if n_samples == 0:
             return 0.0
-        centre = mean.float().to(data.device)
-        squares = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
-        offset = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
-        for values in engine._compared_batches(data, batch_size):
-            centred = values - centre
-            squares += centred.square().sum(0).cpu().double()
-            offset += centred.sum(0).cpu().double()
-        return float(((squares - offset.square() / n_samples) / n_samples).mean())
+        return float((engine._scatter(data, batch_size, mean, n_samples, full=False) / n_samples).mean())
 
     def _check_fitted(self) -> SOM:
         if not hasattr(self, "cluster_centers_"):

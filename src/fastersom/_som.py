@@ -543,22 +543,13 @@ class SOM:
     def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
         """Linear initialisation: the grid in the plane of the first two principal components (see init).
 
-        The covariance is summed about the mean of _mean in batches, each batch's product in float32 on the device and
-        the sum in float64 on the CPU, so that large inputs lose no precision, less the part due to the mean's rounding
-        to float32; its eigenvectors' signs are fixed so that their largest entry is positive.
+        The covariance is that of _scatter; its eigenvectors' signs are fixed so that their largest entry is positive.
         """
         n_features, batch_size = data.shape[1], max(1, (1 << 24) // data.shape[1])
         mean, n_samples = self._mean(data, batch_size)
         if n_samples < 2:
             raise ValueError("init='pca' needs at least two samples with a BMU")
-        centre = mean.float().to(self._device)
-        covariance = torch.zeros(n_features, n_features, dtype=torch.float64, device="cpu")
-        offset = torch.zeros(n_features, dtype=torch.float64, device="cpu")
-        for values in self._compared_batches(data, batch_size):
-            centred = values - centre
-            covariance += (centred.T @ centred).cpu().double()
-            offset += centred.sum(0).cpu().double()
-        covariance -= offset[:, None] * offset / n_samples
+        covariance = self._scatter(data, batch_size, mean, n_samples, full=True)
         values, vectors = torch.linalg.eigh(covariance / (n_samples - 1))
         values, vectors = values.flip(0).clamp_min(0), vectors.flip(1)
         vectors = vectors * vectors.gather(0, vectors.abs().argmax(0, keepdim=True)).sign()
@@ -604,6 +595,25 @@ class SOM:
         if first is None:
             return total, 0
         return first.cpu().double() + total / n_samples, n_samples
+
+    def _scatter(
+        self, data: torch.Tensor, batch_size: int, mean: torch.Tensor, n_samples: int, full: bool
+    ) -> torch.Tensor:
+        """Sum of squares about the mean of _mean of the samples with a BMU as the metric compares them.
+
+        The matrix sum_i (x_i - m)(x_i - m)^T with full, else its diagonal (float64, on the CPU), with mean and
+        n_samples from _mean. It is summed about the mean rounded to float32, batch by batch, each batch's in float32
+        on the device and the sum in float64 on the CPU, so that large inputs lose no precision, less the part due to
+        the rounding of the mean.
+        """
+        centre = mean.float().to(self._device)
+        total = torch.zeros((data.shape[1],) * (2 if full else 1), dtype=torch.float64, device="cpu")
+        offset = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        for values in self._compared_batches(data, batch_size):
+            centred = values - centre
+            total += (centred.T @ centred if full else centred.square().sum(0)).cpu().double()
+            offset += centred.sum(0).cpu().double()
+        return total - (offset[:, None] * offset if full else offset.square()) / n_samples
 
     def _has_bmu(self, data: torch.Tensor) -> torch.Tensor | None:
         """Mask of samples with a BMU: non-zero ones (cosine), non-constant ones (correlation); None if all."""
