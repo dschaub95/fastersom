@@ -125,6 +125,8 @@ class KMeans:
             raise ValueError(f"init must be one of {_INITS} or an array of centroids, got {self.init!r}")
         if self.empty_clusters not in _EMPTY:
             raise ValueError(f"empty_clusters must be one of {_EMPTY}, got {self.empty_clusters!r}")
+        if self.n_local_trials is not None and not _is_int(self.n_local_trials, 1):
+            raise ValueError(f"n_local_trials must be None or an integer >= 1, got {self.n_local_trials!r}")
         if not self.tol >= 0:
             raise ValueError(f"tol must be >= 0, got {self.tol!r}")
         engine = SOM(
@@ -168,7 +170,7 @@ class KMeans:
         if self.init == "random":
             return samples(rng.choice(n_candidates, self.n_clusters, replace=False))
         size = self.init_size if self.init_size is not None else max(100_000, 10 * self.n_clusters)
-        if not isinstance(size, int) or isinstance(size, bool) or size < self.n_clusters:
+        if not _is_int(size, self.n_clusters):
             raise ValueError(f"init_size must be an integer >= n_clusters, got {size!r}")
         if n_candidates > size:
             subset = samples(np.sort(rng.choice(n_candidates, size, replace=False)))

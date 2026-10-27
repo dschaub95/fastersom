@@ -188,6 +188,17 @@ def test_empty_clusters_take_only_samples_with_a_centroid():
     np.testing.assert_array_equal(centroids.cluster_centers_, [[1, 0, 0], [1, 0, 0], [0, 0, 1]])
 
 
+def test_init_size_and_n_local_trials(data):
+    fitted = KMeans(6, init_size=np.int64(500), n_local_trials=np.int64(3), max_iter=2, device="cpu").fit(data)
+    assert fitted.cluster_centers_.shape == (6, 5)
+    for size in (5, 6.0, True):
+        with pytest.raises(ValueError, match="init_size"):
+            KMeans(6, init_size=size, device="cpu").fit(data)
+    for trials in (0, 2.0, True):
+        with pytest.raises(ValueError, match="n_local_trials"):
+            KMeans(6, n_local_trials=trials, device="cpu").fit(data)
+
+
 def test_n_clusters(data):
     with pytest.raises(ValueError, match="n_clusters must be an integer"):
         KMeans(0, device="cpu").fit(data)
