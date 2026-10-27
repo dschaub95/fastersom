@@ -25,6 +25,7 @@ __pycache__/
 /docs/generated/
 /docs/_build/
 
-# fastersom: benchmark and tutorial data
+# fastersom: benchmark results and data, and tutorial data
 /benchmarks/data/
+/benchmarks/results/
 /docs/tutorials/data/
