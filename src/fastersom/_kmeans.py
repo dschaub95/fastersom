@@ -345,7 +345,10 @@ class KMeans:
         return self._check_fitted().predict(X)
 
     def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
-        """Fit the centroids and return the cluster of every sample (``labels_``, computed even without compute_labels)."""
+        """Fit the centroids and return the cluster of every sample.
+
+        That is ``labels_``, computed even without compute_labels.
+        """
         self.fit(X)
         return self.labels_ if self.compute_labels else self.predict(X)
 

@@ -277,9 +277,9 @@ class SOM:
         (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
         epoch's update is the same up to float summation order, but over several epochs such rounding differences
         (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-        on the CPU to 2^24 / n_nodes, from 8192 to 65536, and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
-        kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
-        recommends; 65536 before torch 2.5).
+        on the CPU to 2^24 / n_nodes, from 8192 to 65536, and on GPUs to 2^28 / n_nodes (where speed levels off;
+        2^26 / n_features with the fused kernel), fewer if that does not fit in memory_fraction of the free GPU
+        memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
     memory_fraction
         Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
         on CUDA and 0.5 on MPS, whose memory the system and other apps share.
