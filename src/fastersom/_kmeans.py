@@ -285,9 +285,8 @@ class KMeans:
                 _synchronize(engine._device)
             if shift <= threshold:
                 break
-        self.cluster_centers_ = centroids.cpu().numpy()
-        self.n_features_in_ = data.shape[1]
-        self._centroids, self._engine_ = centroids, engine
+        engine._set_weights(centroids)  # the engine's nodes are the centroids, for predict and transform
+        self.cluster_centers_, self.n_features_in_, self._engine_ = engine.weights_, data.shape[1], engine
         if self.compute_labels:
             labels, distances = engine._bmus(data, centroids)
             assert distances is not None
@@ -341,17 +340,9 @@ class KMeans:
             raise RuntimeError("This KMeans instance is not fitted yet, call fit() first")
         return self._engine_
 
-    def _check_X(self, engine: SOM, X: ArrayLike | torch.Tensor) -> torch.Tensor:
-        data = engine._check_X(X)
-        if data.shape[1] != self.n_features_in_:
-            raise ValueError(f"X has {data.shape[1]} features, but KMeans was fitted with {self.n_features_in_}")
-        return data
-
     def predict(self, X: ArrayLike | torch.Tensor) -> np.ndarray:
         """Return the nearest centroid (int64) of every sample; -1 for samples without one (see metric)."""
-        engine = self._check_fitted()
-        labels, _ = engine._bmus(self._check_X(engine, X), self._centroids, return_distance=False)
-        return labels.cpu().numpy()
+        return self._check_fitted().predict(X)
 
     def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
         """Fit the centroids and return the cluster of every sample (``labels_``, computed even without compute_labels)."""
@@ -360,15 +351,7 @@ class KMeans:
 
     def transform(self, X: ArrayLike | torch.Tensor) -> np.ndarray:
         """Return the distance of every sample to every centroid in the metric, shape (n_samples, n_clusters)."""
-        engine = self._check_fitted()
-        data = self._check_X(engine, X)
-        engine._weights = self._centroids  # the distances of the engine's nodes, which are the centroids
-        # on the CPU, as it can exceed device memory
-        distances = torch.empty(len(data), self.n_clusters, dtype=torch.float32, device="cpu")
-        batch_size = engine._batch_size_for(data, None)
-        for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
-            rows.copy_(engine._distances(batch))
-        return distances.numpy()
+        return self._check_fitted().transform(X)
 
     def __getstate__(self) -> dict:
         """Keeps the parameters and numpy fitted attributes only, so the pickle does not depend on the device."""
@@ -381,6 +364,5 @@ class KMeans:
         """Restores a pickled model on the configured device if available (cpu, cuda, mps), else the default one."""
         self.__dict__.update(state)
         if hasattr(self, "cluster_centers_"):
-            engine = self._engine(fall_back=True)
-            self._engine_ = engine
-            self._centroids = torch.as_tensor(self.cluster_centers_, device=engine._device)
+            self._engine_ = self._engine(fall_back=True)
+            self._engine_._set_weights(torch.as_tensor(self.cluster_centers_, device=self._engine_._device))
