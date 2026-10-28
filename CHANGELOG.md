@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- On the CPU, a fit adds the samples of up to 2^20 samples at once rather than batch by batch, as index_add_ spreads
+  over the threads only for many rows. Sums now add in another order, which changes results only by float rounding.
+
 ## 0.6.0 (2026-10-26)
 
 - Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose
