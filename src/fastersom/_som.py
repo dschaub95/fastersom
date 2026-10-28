@@ -266,14 +266,14 @@ class SOM:
         ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
         normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); ``"pca"``
         places the nodes on a regular grid in the plane of the samples' first two principal components (linear
-        initialisation, as the SOM Toolbox's som_lininit): centred at the mean, the longer side of the map along the
-        first component, each side spanning one standard deviation of its component to either side (a side of one
-        node stays at the mean); under cosine and correlation, the components of the samples scaled to unit length
-        (and centred) as the metric compares them, of the samples with a BMU; an array of
-        shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
-        map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
-        largely retrains the map; to continue training, pass a small sigma_initial such as the previous
-        sigma_final.
+        initialisation, as the SOM Toolbox's som_lininit, which puts the first component along the rows instead):
+        centred at the mean, the longer side of the map along the first component, each side spanning one standard
+        deviation of its component to either side (a side of one node stays at the mean); under cosine and
+        correlation, the components of the samples scaled to unit length (and centred) as the metric compares them, of
+        the samples with a BMU; an array of shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives
+        the initial weights, e.g. another map's ``weights_`` for a warm start. The sigma schedule restarts at
+        sigma_initial, which with the default largely retrains the map; to continue training, pass a small
+        sigma_initial such as the previous sigma_final.
     metric
         ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
         (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
@@ -597,7 +597,8 @@ class SOM:
 
         Each batch is summed in float32 on the device less the first such sample, so that an offset common to the
         samples is not rounded however large (equal samples have their exact mean), and the batches' sums in float64
-        on the CPU. The mean is 0 without samples.
+        on the CPU. A first sample far from the others rounds the mean to about float32's precision at their distance
+        (see issue #29). The mean is 0 without samples.
         """
         total = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
         first, n_samples = None, 0
@@ -615,7 +616,8 @@ class SOM:
 
         The matrix sum_i (x_i - m)(x_i - m)^T (float64, on the CPU), with mean and n_samples from _mean. It is summed
         about the mean rounded to float32, batch by batch, each batch's in float32 on the device and the sum in float64
-        on the CPU, so that large inputs lose no precision, less the part due to the rounding of the mean.
+        on the CPU, so that large inputs lose no precision, less the part due to the rounding of the mean. The float32
+        products overflow for values of about 1e18 (see issue #30), beyond those a float32 fit handles anyway.
         """
         centre = mean.float().to(self._device)
         total = torch.zeros((data.shape[1],) * 2, dtype=torch.float64, device="cpu")
