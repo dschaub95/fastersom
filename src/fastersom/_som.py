@@ -28,7 +28,7 @@ from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, NamedTuple, cast, overload
 
 import numpy as np
 import torch
@@ -212,6 +212,19 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
     elif device.type == "mps":
         torch.mps.synchronize()
+
+
+class _Summing(NamedTuple):
+    """How SOM._sums adds the samples of a fit (see SOM._summing)."""
+
+    deterministic: bool
+    mps: bool
+    fixed_point: bool = False
+    low_shift: int = 0  # the remainders' scale, 2^low_shift
+    shift: torch.Tensor | None = None  # MPS: per-feature shifts to fixed point
+    factors: tuple[torch.Tensor, torch.Tensor] | None = None  # MPS: 2^exponent as two float32 factors
+    scale: torch.Tensor | None = None  # CUDA: per-feature scales to fixed point (float64)
+    fixed_rows: int = 0  # CUDA: rows per part of the float64 and int64 copies
 
 
 class SOM:
@@ -744,7 +757,7 @@ class SOM:
 
     def _summing(
         self, n_samples: int, kernel: str | None, deterministic: bool, magnitude: torch.Tensor | None
-    ) -> dict[str, Any]:
+    ) -> _Summing:
         """How _sums adds the samples of a fit: in float, or deterministically.
 
         Deterministic sums add int64 fixed point, which unlike index_add_'s atomic float additions gives the same
@@ -757,24 +770,19 @@ class SOM:
         values to sum, needed when deterministic.
         """
         mps = self._device.type == "mps"
-        summing: dict[str, Any] = {"mps": mps, "deterministic": deterministic}
-        summing["fixed_point"] = fixed_point = deterministic and (not mps or kernel in _METAL)
-        if fixed_point:
-            assert magnitude is not None
-            low_shift = 62 - n_samples.bit_length()  # remainders within +-0.5, so their sums below 2^61
-            summing["low_shift"] = low_shift
-            # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
-            _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
-            if mps:  # the shifts, and 2^exponent as two float32 factors, which MPS's lack of float64 calls for
-                summing["shift"] = (low_shift - exponent).int().to(self._device)
-                split = exponent // 2
-                summing["factors"] = [
-                    torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split)
-                ]
-            else:
-                summing["scale"] = magnitude.new_ones(len(magnitude), dtype=torch.float64).ldexp_(low_shift - exponent)
-                summing["fixed_rows"] = max(1, (1 << 21) // len(magnitude))
-        return summing
+        if not deterministic or (mps and kernel not in _METAL):
+            return _Summing(deterministic, mps)
+        assert magnitude is not None
+        low_shift = 62 - n_samples.bit_length()  # remainders within +-0.5, so their sums below 2^61
+        # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
+        _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
+        if mps:  # the shifts, and 2^exponent as two float32 factors, which MPS's lack of float64 calls for
+            split = exponent // 2
+            first, second = (torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split))
+            shift = (low_shift - exponent).int().to(self._device)
+            return _Summing(True, mps, True, low_shift, shift=shift, factors=(first, second))
+        scale = magnitude.new_ones(len(magnitude), dtype=torch.float64).ldexp_(low_shift - exponent)
+        return _Summing(True, mps, True, low_shift, scale=scale, fixed_rows=max(1, (1 << 21) // len(magnitude)))
 
     def _sums(
         self,
@@ -782,12 +790,12 @@ class SOM:
         search: Callable[[torch.Tensor], torch.Tensor],
         n_nodes: int,
         batch_size: int,
-        summing: dict[str, Any],
+        summing: _Summing,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Per-node sums (float32) and counts of the samples assigned by search; samples without a BMU add nothing."""
         if data.device.type == "cpu":  # always deterministic, so fit never asks for deterministic sums there
             return self._sums_cpu(data, search, n_nodes, batch_size)
-        fixed_point, mps = summing["fixed_point"], summing["mps"]
+        fixed_point, mps, low_shift = summing.fixed_point, summing.mps, summing.low_shift
         sums = data.new_zeros((n_nodes, data.shape[1]), dtype=torch.long if fixed_point else torch.float32)
         lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
         # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
@@ -798,19 +806,15 @@ class SOM:
             if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count them)
                 batch = batch * keep[:, None]
             if fixed_point and mps:
-                _module(self._device, "metal").fixed_sums(
-                    batch, bmus, summing["shift"], summing["low_shift"], sums, lows
-                )
+                _module(self._device, "metal").fixed_sums(batch, bmus, summing.shift, low_shift, sums, lows)
             elif fixed_point:  # in parts of 2^21 values, as the float64 and int64 copies take 6x the memory
-                for rows, part in zip(
-                    bmus.split(summing["fixed_rows"]), batch.split(summing["fixed_rows"]), strict=True
-                ):
-                    value = part.double().mul_(summing["scale"])
+                for rows, part in zip(bmus.split(summing.fixed_rows), batch.split(summing.fixed_rows), strict=True):
+                    value = part.double().mul_(summing.scale)
                     high = value.round()
                     sums.index_add_(0, rows, high.long())
-                    lows.index_add_(0, rows, value.sub_(high).mul_(2.0 ** summing["low_shift"]).round_().long())
+                    lows.index_add_(0, rows, value.sub_(high).mul_(2.0**low_shift).round_().long())
                     del value, high  # before the next part's copies
-            elif summing["deterministic"]:  # on MPS without the Metal kernels a matrix product, in a fixed order
+            elif summing.deterministic:  # on MPS without the Metal kernels a matrix product, in a fixed order
                 sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
             else:
                 sums.index_add_(0, bmus, batch)
@@ -818,11 +822,13 @@ class SOM:
                 0, bmus, torch.ones_like(bmus, dtype=counts.dtype) if keep is None else keep.to(counts.dtype)
             )
         if fixed_point and mps:
-            low_shift, (first, second) = summing["low_shift"], summing["factors"]
+            assert summing.factors is not None
+            first, second = summing.factors
             sums = (sums.float() + lows.float() * 2.0**-low_shift) * 2.0**-low_shift * first * second
         elif fixed_point:
-            scale = summing["scale"]
-            sums = (sums / scale + lows / (scale * 2.0 ** summing["low_shift"])).float()
+            scale = summing.scale
+            assert scale is not None
+            sums = (sums / scale + lows / (scale * 2.0**low_shift)).float()
         return sums, counts
 
     def _sums_cpu(
