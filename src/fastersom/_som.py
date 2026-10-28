@@ -519,14 +519,14 @@ class SOM:
             if weights.shape[1] != data.shape[1]:
                 raise ValueError(f"X has {data.shape[1]} features, but init has {weights.shape[1]}")
             return weights
+        if self.init == "pca":
+            return self._pca_weights(data)
         rng = np.random.RandomState(self.random_state)
         n_nodes = self.n_rows * self.n_cols
         if self.init == "random":
             values = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
             values /= np.linalg.norm(values, axis=-1, keepdims=True)
             return torch.as_tensor(values.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
-        if self.init == "pca":
-            return self._pca_weights(data)
         has_bmu = self._has_bmu(data)
         candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
         if len(candidates) == 0:
@@ -785,7 +785,7 @@ class SOM:
         summing: dict[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Per-node sums (float32) and counts of the samples assigned by search; samples without a BMU add nothing."""
-        if data.device.type == "cpu" and not summing["deterministic"]:
+        if data.device.type == "cpu":  # always deterministic, so fit never asks for deterministic sums there
             return self._sums_cpu(data, search, n_nodes, batch_size)
         fixed_point, mps = summing["fixed_point"], summing["mps"]
         sums = data.new_zeros((n_nodes, data.shape[1]), dtype=torch.long if fixed_point else torch.float32)
