@@ -23,7 +23,7 @@ import subprocess
 import sys
 import sysconfig
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
@@ -36,7 +36,7 @@ from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 _METRICS = ("euclidean", "manhattan", "cosine", "correlation")
-_INITS = ("random", "sample")
+_INITS = ("random", "sample", "pca")
 # Up to this many features the float32 kernel beats cuBLAS's matrix product plus argmin for euclidean, cosine and
 # correlation (fit on an A100 from 100 to 10,000 nodes: 1.2-2.3x at 34 and 64 features, 1.1-1.2x at 128); beyond it
 # the matrix product is compute-bound and cuBLAS catches up (as fast at 192, 0.9x at 256). Manhattan's fused kernel is
@@ -251,7 +251,12 @@ class SOM:
         schedule.
     init
         ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
-        normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
+        normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); ``"pca"``
+        places the nodes on a regular grid in the plane of the samples' first two principal components (linear
+        initialisation, as the SOM Toolbox's som_lininit): centred at the mean, the longer side of the map along the
+        first component, each side spanning one standard deviation of its component to either side (a side of one
+        node stays at the mean); under cosine and correlation, the components of the samples scaled to unit length
+        (and centred) as the metric compares them, of the samples with a BMU; an array of
         shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
         map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
         largely retrains the map; to continue training, pass a small sigma_initial such as the previous
@@ -520,12 +525,93 @@ class SOM:
             values = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
             values /= np.linalg.norm(values, axis=-1, keepdims=True)
             return torch.as_tensor(values.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
+        if self.init == "pca":
+            return self._pca_weights(data)
         has_bmu = self._has_bmu(data)
         candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
         if len(candidates) == 0:
             raise ValueError(f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU")
         picks = rng.choice(len(candidates), n_nodes, replace=len(candidates) < n_nodes)
         return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
+
+    def _compared(self, batch: torch.Tensor) -> torch.Tensor:
+        """The samples as the metric compares them: scaled to unit length (cosine), also centred (correlation)."""
+        if self.metric not in ("cosine", "correlation"):
+            return batch
+        batch = self._centre(batch)
+        return batch / batch.norm(dim=1, keepdim=True).clamp_min(1e-30)
+
+    def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
+        """Linear initialisation: the grid in the plane of the first two principal components (see init).
+
+        The covariance is that of _scatter; its eigenvectors' signs are fixed so that their largest entry is positive.
+        """
+        n_features, batch_size = data.shape[1], max(1, (1 << 24) // data.shape[1])
+        mean, n_samples = self._mean(data, batch_size)
+        if n_samples < 2:
+            raise ValueError("init='pca' needs at least two samples with a BMU")
+        covariance = self._scatter(data, batch_size, mean, n_samples)
+        values, vectors = torch.linalg.eigh(covariance / (n_samples - 1))
+        values, vectors = values.flip(0).clamp_min(0), vectors.flip(1)
+        vectors = vectors * vectors.gather(0, vectors.abs().argmax(0, keepdim=True)).sign()
+        axes = [
+            vectors[:, k] * values[k].sqrt()
+            if k < n_features
+            else torch.zeros(n_features, dtype=torch.float64, device="cpu")
+            for k in range(2)
+        ]
+        long_rows = self.n_rows >= self.n_cols  # the longer side along the first component
+        row_axis, col_axis = (axes[0], axes[1]) if long_rows else (axes[1], axes[0])
+
+        def positions(n: int) -> torch.Tensor:
+            if n == 1:
+                return torch.zeros(1, dtype=torch.float64, device="cpu")
+            return torch.linspace(-1, 1, n, dtype=torch.float64, device="cpu")
+
+        grid = (
+            mean + positions(self.n_rows)[:, None, None] * row_axis + positions(self.n_cols)[None, :, None] * col_axis
+        )
+        return grid.reshape(self.n_rows * self.n_cols, n_features).float().to(self._device)
+
+    def _compared_batches(self, data: torch.Tensor, batch_size: int) -> Iterator[torch.Tensor]:
+        """The samples with a BMU as the metric compares them (see _compared), batch by batch."""
+        for batch in data.split(batch_size):
+            keep = self._has_bmu(batch)
+            yield self._compared(batch if keep is None else batch[keep])
+
+    def _mean(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, int]:
+        """Mean (float64, on the CPU) and number of the samples with a BMU as the metric compares them.
+
+        Each batch is summed in float32 on the device less the first such sample, so that an offset common to the
+        samples is not rounded however large (equal samples have their exact mean), and the batches' sums in float64
+        on the CPU. The mean is 0 without samples.
+        """
+        total = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        first, n_samples = None, 0
+        for values in self._compared_batches(data, batch_size):
+            if len(values):
+                first = values[0].clone() if first is None else first
+                total += (values - first).sum(0).cpu().double()
+                n_samples += len(values)
+        if first is None:
+            return total, 0
+        return first.cpu().double() + total / n_samples, n_samples
+
+    def _scatter(self, data: torch.Tensor, batch_size: int, mean: torch.Tensor, n_samples: int) -> torch.Tensor:
+        """Sum of squares about the mean of _mean of the samples with a BMU as the metric compares them.
+
+        The matrix sum_i (x_i - m)(x_i - m)^T (float64, on the CPU), with mean and n_samples from _mean. It is summed
+        about the mean rounded to float32, batch by batch, each batch's in float32 on the device and the sum in float64
+        on the CPU, so that large inputs lose no precision, less the part due to the rounding of the mean.
+        """
+        centre = mean.float().to(self._device)
+        total = torch.zeros((data.shape[1],) * 2, dtype=torch.float64, device="cpu")
+        offset = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        for values in self._compared_batches(data, batch_size):
+            centred = values - centre
+            total += (centred.T @ centred).cpu().double()
+            offset += centred.sum(0).cpu().double()
+        return total - offset[:, None] * offset / n_samples
 
     def _has_bmu(self, data: torch.Tensor) -> torch.Tensor | None:
         """Mask of samples with a BMU: non-zero ones (cosine), non-constant ones (correlation); None if all."""

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
+  components, centred at the mean, with the longer side of the map along the first component and each side spanning one
+  standard deviation of its component; under cosine and correlation of the samples as these metrics compare them.
 - On the CPU, a fit adds the samples of up to 2^20 samples at once rather than batch by batch, as index_add_ spreads
   over the threads only for many rows. Sums now add in another order, which changes results only by float rounding.
 - The default batch size on the CPU is 2^22 / n_nodes, from 512 to 65536 (8192 before), so that a batch's scores stay
