@@ -19,7 +19,8 @@ On top of it come the data itself, `n_samples x n_features` float32 values on th
 
 With `batch_size=None` (the default):
 
-- On the CPU, the batch size is 8192.
+- On the CPU, it is `2**22 / n_nodes` samples, from 512 to 65536, so that a batch's score matrix stays within about
+  16 MB: beyond about `2**22`-`2**23` scores, an epoch takes 2-4x as long on an x86 CPU (an AMD EPYC 7742).
 - On CUDA and MPS, it is the largest batch that still helps speed: `2**28 / n_nodes` samples on the torch path and
   `2**26 / n_features` with the fused kernels. It is reduced if that would not fit in `memory_fraction` of the free GPU
   memory. `memory_fraction` defaults to 0.9 on CUDA and 0.5 on MPS, where the free memory is the memory torch
@@ -46,9 +47,9 @@ which takes about 0.25 GiB per copy.
   `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, set before torch is imported.
 - **Very large maps on the torch path:** the score matrix grows with the number of nodes, so a 200 x 200 map holds
   40,000 floats per sample; the default then picks small batches (6,710 samples at 200 x 200 nodes).
-- **The CPU:** the default of 8192 samples does not depend on the map size, so its score matrix takes 29 MB at
-  30 x 30 nodes and 1.3 GB at 200 x 200 nodes; set a smaller `batch_size` for very large maps on machines with little
-  memory.
+- **The CPU:** the default keeps the score matrix at about 16 MB up to 8192 nodes, and at 512 samples beyond (80 MB
+  at 200 x 200 nodes). For maps that large with many features, `batch_size=8192` can be faster (at 200 x 200 nodes and
+  64 features, an epoch took 24 s at 8192 samples and 34 s at 512 on an AMD EPYC 7742 with 8 threads).
 
 ## Other memory to keep in mind
 
