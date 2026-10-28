@@ -4,6 +4,11 @@
 
 - On the CPU, a fit adds the samples of up to 2^20 samples at once rather than batch by batch, as index_add_ spreads
   over the threads only for many rows. Sums now add in another order, which changes results only by float rounding.
+- The default batch size on the CPU is 2^22 / n_nodes, from 512 to 65536 (8192 before), so that a batch's scores stay
+  within about 16 MB: beyond about 2^22-2^23 scores, an epoch takes 2-4x as long. On 200,000 samples x 16 and 64
+  features on an AMD EPYC 7742 with 8 threads, an epoch takes about as long up to 22 x 22 nodes and a third to a half
+  as long from 32 x 32 to 100 x 100 nodes (71 x 71 x 16: 1.74 to 0.55 s), but at 200 x 200 nodes x 64 features about
+  40% longer (23.7 to 34 s; pass `batch_size=8192` there).
 
 ## 0.6.0 (2026-10-26)
 
