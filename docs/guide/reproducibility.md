@@ -4,8 +4,8 @@
 
 `random_state` seeds the initialisation, with NumPy's `RandomState`: `init="random"` (the default) draws the node
 weights uniformly from $[-1, 1]^d$ and normalises them to unit length, and `init="sample"` picks random samples (ones
-with a BMU under the metric). Training itself is not random: every epoch updates the map from all samples. With an
-array as `init`, `random_state` has no effect.
+with a BMU under the metric). Training itself is not random: every epoch updates the map from all samples. With
+`init="pca"` or an array as `init`, `random_state` has no effect.
 
 ## Deterministic fitting on GPUs
 

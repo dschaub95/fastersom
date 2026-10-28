@@ -24,7 +24,8 @@ Such samples have no BMU:
 - `predict` returns the label -1 for them, and the distance NaN with `return_distance=True`; `labels_` likewise holds
   -1.
 - `transform` gives them distance 1 to every node.
-- `fit` leaves them out of the update, `init="sample"` does not pick them, and the error measures leave them out.
+- `fit` leaves them out of the update, `init="sample"` does not pick them, `init="pca"` leaves them out of the
+  principal components, and the error measures leave them out.
 
 Euclidean and manhattan distances are defined for every sample.
 

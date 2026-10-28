@@ -36,7 +36,7 @@ An array
 ```python
 from fastersom import SOM
 
-som = SOM(30, 30, init="pca", random_state=0).fit(X)
+som = SOM(30, 30, init="pca").fit(X)
 ```
 
 The covariance is computed in two passes over the samples, each batch on the device and the sum in double precision
