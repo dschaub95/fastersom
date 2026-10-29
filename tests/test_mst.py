@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from fastersom import SOM, KMeans, SpanningTree, _mst, minimum_spanning_tree
+from fastersom import SOM, SpanningTree, _mst, minimum_spanning_tree
 
 scipy_distance = pytest.importorskip("scipy.spatial.distance")
 csgraph = pytest.importorskip("scipy.sparse.csgraph")
@@ -69,11 +69,13 @@ def _points(kind):
         return X.astype(np.float32)
     if kind == "som":
         return SOM(20, 20, n_epochs=5, random_state=0, device="cpu").fit(blobs()).weights_
-    return KMeans(150, random_state=0, max_iter=20, device="cpu").fit(blobs()).cluster_centers_
+    # k-means centroids: a width of 0 in every epoch makes each epoch a batch k-means step
+    som = SOM(10, 15, n_epochs=20, sigma_schedule=[0.0] * 20, init="sample", random_state=0, device="cpu")
+    return som.fit(blobs()).weights_
 
 
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("kind", ["gaussian", "mixture", "som", "kmeans"])
+@pytest.mark.parametrize("kind", ["gaussian", "mixture", "som", "centroids"])
 @pytest.mark.parametrize("batch_size", [None, 37])
 def test_matches_scipy(device, kind, batch_size):
     X = points(kind)
@@ -364,18 +366,10 @@ def test_methods_of_fitted_models(metric):
         tree = model.minimum_spanning_tree()
         np.testing.assert_array_equal(tree.edges, expected.edges)
         np.testing.assert_array_equal(tree.weights, expected.weights)
-    kmeans = KMeans(40, metric=metric, random_state=0, max_iter=10, device="cpu").fit(blobs())
-    expected = minimum_spanning_tree(kmeans.cluster_centers_, metric, device="cpu")
-    for model in (kmeans, pickle.loads(pickle.dumps(kmeans))):
-        tree = model.minimum_spanning_tree()
-        np.testing.assert_array_equal(tree.edges, expected.edges)
-        np.testing.assert_array_equal(tree.weights, expected.weights)
     fast = minimum_spanning_tree(som.weights_, metric, exact=False, device="cpu")
     np.testing.assert_array_equal(som.minimum_spanning_tree(exact=False).edges, fast.edges)
     with pytest.raises(RuntimeError, match="not fitted"):
         SOM(3, 3).minimum_spanning_tree()
-    with pytest.raises(RuntimeError, match="not fitted"):
-        KMeans(3).minimum_spanning_tree()
 
 
 def float32_search(monkeypatch):

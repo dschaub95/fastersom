@@ -27,25 +27,18 @@
     35 features at most 0.11 s per epoch at 300 x 300 nodes).
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
-- `fastersom.minimum_spanning_tree(X, metric)` and `SOM.minimum_spanning_tree()` / `KMeans.minimum_spanning_tree()`:
-  the minimum spanning tree of points, a map's nodes or k-means centroids, by Borůvka's algorithm with a masked
-  nearest-point search per round on the torch path, in memory for the points and one block of batch x points scores
-  (no n x n matrix). With `exact=True` (the default), rows whose two best scores are not separated by more than a
-  rigorous bound of the rounding error are searched again in float64, which makes the tree the unique minimum spanning
-  tree of the float64 distances under the order (distance, lower index, higher index), independent of the device, batch
-  size and thread count; it matches scipy's tree of the dense distance matrix on the test inputs. Identical points are
-  joined by edges of distance 0. Euclidean, manhattan, cosine and correlation (as the euclidean tree of the rows scaled
-  to unit length, and centred). On an M3 Max CPU (8 threads) 0.45 s for 10,000 points and 5.3 s for 40,000 points of 34
-  features, with about 0.3 GB beyond the points. The result, a `SpanningTree`, holds the edges and their distances and
-  gives degrees, leaves, hop counts and path lengths, single-linkage clusters (`labels`), a scipy linkage matrix and a
-  scipy sparse matrix, each in memory linear in the number of nodes beyond the output.
-- `KMeans`: k-means clustering (Lloyd's algorithm) with the nearest-node search and summation of `SOM`, including the
-  fused kernels on CUDA and MPS and `deterministic`. Greedy k-means++ initialisation as in scikit-learn (or random
-  samples, or given centroids), scikit-learn's convergence criterion, empty clusters moved to the farthest samples as in
-  scikit-learn (or kept, `empty_clusters="keep"`), and spherical k-means under cosine and correlation. From the same
-  initial centroids, centroids, labels and the number of iterations match scikit-learn's `KMeans(algorithm="lloyd")` on
-  the CPU. `compute_labels=False` skips the pass for `labels_` and `inertia_` when only the centroids are needed.
-  k-means++ seeds on a random subsample of `init_size` samples (by default max(100,000, 10 x n_clusters)).
+- `fastersom.minimum_spanning_tree(X, metric)` and `SOM.minimum_spanning_tree()`: the minimum spanning tree of points
+  (such as centroids) or a map's nodes, by Borůvka's algorithm with a masked nearest-point search per round on the torch
+  path, in memory for the points and one block of batch x points scores (no n x n matrix). With `exact=True` (the
+  default), rows whose two best scores are not separated by more than a rigorous bound of the rounding error are
+  searched again in float64, which makes the tree the unique minimum spanning tree of the float64 distances under the
+  order (distance, lower index, higher index), independent of the device, batch size and thread count; it matches
+  scipy's tree of the dense distance matrix on the test inputs. Identical points are joined by edges of distance 0.
+  Euclidean, manhattan, cosine and correlation (as the euclidean tree of the rows scaled to unit length, and centred).
+  On an M3 Max CPU (8 threads) 0.45 s for 10,000 points and 5.3 s for 40,000 points of 34 features, with about 0.3 GB
+  beyond the points. The result, a `SpanningTree`, holds the edges and their distances and gives degrees, leaves, hop
+  counts and path lengths, single-linkage clusters (`labels`), a scipy linkage matrix and a scipy sparse matrix, each in
+  memory linear in the number of nodes beyond the output.
 - `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
   components, centred at the mean, with the longer side of the map along the first component and each side spanning one
   standard deviation of its component; under cosine and correlation of the samples as these metrics compare them.
