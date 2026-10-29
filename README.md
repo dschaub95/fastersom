@@ -49,7 +49,8 @@ Options:
   the neighbourhood-weighted mean of the raw samples (not the median under manhattan, nor centred samples under
   correlation). Zero-norm samples under cosine and constant samples under correlation have no BMU: they get label -1
   and distance NaN in `predict`, distance 1 in `transform`, and are left out of the update and the error measures.
-- `init="sample"` initialises the nodes from random samples instead of seeded random unit vectors. An array of shape
+- `init="sample"` initialises the nodes from random samples instead of seeded random unit vectors, and `init="pca"`
+  on a grid in the plane of the samples' first two principal components. An array of shape
   `(n_rows * n_cols, d)` or `(n_rows, n_cols, d)` gives the initial weights instead, e.g. for a warm start
   (`SOM(init=som.weights_).fit(X)`); with `n_epochs=0`, `fit` keeps them unchanged. The sigma schedule restarts at
   `sigma_initial`, which with the default largely retrains the map; to continue training instead, pass a small

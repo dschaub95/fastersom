@@ -23,7 +23,7 @@ import subprocess
 import sys
 import sysconfig
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
@@ -36,7 +36,7 @@ from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 _METRICS = ("euclidean", "manhattan", "cosine", "correlation")
-_INITS = ("random", "sample")
+_INITS = ("random", "sample", "pca")
 # Up to this many features the float32 kernel beats cuBLAS's matrix product plus argmin for euclidean, cosine and
 # correlation (fit on an A100 from 100 to 10,000 nodes: 1.2-2.3x at 34 and 64 features, 1.1-1.2x at 128); beyond it
 # the matrix product is compute-bound and cuBLAS catches up (as fast at 192, 0.9x at 256). Manhattan's fused kernel is
@@ -51,6 +51,10 @@ _FUSED_MAX_FEATURES = 128
 _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
+# samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu), and their largest number of values: each
+# part is copied by the selection of the samples with a BMU, 64 MB per copy at most unless a batch is larger
+_CPU_SUM_ROWS = 1 << 20
+_CPU_SUM_VALUES = 1 << 24
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
 # with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
@@ -247,11 +251,16 @@ class SOM:
         schedule.
     init
         ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
-        normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
-        shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
-        map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
-        largely retrains the map; to continue training, pass a small sigma_initial such as the previous
-        sigma_final.
+        normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); ``"pca"``
+        places the nodes on a regular grid in the plane of the samples' first two principal components (linear
+        initialisation, as the SOM Toolbox's som_lininit, which puts the first component along the rows instead):
+        centred at the mean, the longer side of the map along the first component, each side spanning one standard
+        deviation of its component to either side (a side of one node stays at the mean); under cosine and
+        correlation, the components of the samples scaled to unit length (and centred) as the metric compares them, of
+        the samples with a BMU; an array of shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives
+        the initial weights, e.g. another map's ``weights_`` for a warm start. The sigma schedule restarts at
+        sigma_initial, which with the default largely retrains the map; to continue training, pass a small
+        sigma_initial such as the previous sigma_final.
     metric
         ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
         (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
@@ -268,9 +277,10 @@ class SOM:
         (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
         epoch's update is the same up to float summation order, but over several epochs such rounding differences
         (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-        to 8192 on CPU and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
-        kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
-        recommends; 65536 before torch 2.5).
+        on the CPU to 2^22 / max(n_nodes, n_features), from 512 to 65536, and 8192 beyond 16,384 nodes or features
+        (on macOS 2^24 / max(n_nodes, n_features), from 8192 to 65536), and on GPUs to 2^28 / n_nodes (where speed
+        levels off; 2^26 / n_features with the fused kernel), fewer if that does not fit in memory_fraction of the
+        free GPU memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
     memory_fraction
         Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
         on CUDA and 0.5 on MPS, whose memory the system and other apps share.
@@ -457,8 +467,25 @@ class SOM:
             free, fraction = torch.cuda.mem_get_info(self._device)[0] + cached, 0.9
         elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
             free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
+        elif self._device.type == "cpu":
+            largest = max(self.n_rows * self.n_cols, data.shape[1])
+            if sys.platform == "darwin":
+                # a few operations per batch dominate below about 2^24 scores (64 MB), the matrix product above (on an
+                # M3 Max at 34 features, an epoch half as long at 10 x 10 nodes as at 8192 rows); many features cap the
+                # rows as many nodes do, so that a batch's copies stay within that too
+                return min(1 << 16, max(8192, (1 << 24) // largest))
+            # a batch's scores, and its copies, in about 16 MB each: glibc maps blocks above 32 MB afresh on every
+            # allocation, whose page faults make an epoch take up to 2-4x as long (on an AMD EPYC 7742 with 8 threads,
+            # from 5 x 5 to 100 x 100 nodes and 8 to 4000 features); below 512 rows, rereading the weights for each
+            # batch costs more than the cache saves
+            if 512 * largest > 1 << 23:
+                # beyond 16,384 nodes or features even 512 rows exceed 32 MB, so smaller batches only add overhead
+                # per batch (with 16 threads at 60 features, an epoch 10% shorter at 140 x 140 nodes at 8192 rows
+                # than at 512, 18% at 200 x 200)
+                return 8192
+            return min(1 << 16, max(512, (1 << 22) // largest))
         else:
-            return 8192 if self._device.type == "cpu" else 1 << 16
+            return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
         n_features = data.shape[1]
         if kernel is not None:
@@ -505,6 +532,8 @@ class SOM:
             if weights.shape[1] != data.shape[1]:
                 raise ValueError(f"X has {data.shape[1]} features, but init has {weights.shape[1]}")
             return weights
+        if self.init == "pca":
+            return self._pca_weights(data)
         rng = np.random.RandomState(self.random_state)
         n_nodes = self.n_rows * self.n_cols
         if self.init == "random":
@@ -517,6 +546,82 @@ class SOM:
             raise ValueError(f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU")
         picks = rng.choice(len(candidates), n_nodes, replace=len(candidates) < n_nodes)
         return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
+
+    def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
+        """Linear initialisation: the grid in the plane of the first two principal components (see init).
+
+        The covariance is that of _scatter; its eigenvectors' signs are fixed so that their largest entry is positive.
+        """
+        n_features, batch_size = data.shape[1], max(1, (1 << 24) // data.shape[1])
+        mean, n_samples = self._mean(data, batch_size)
+        if n_samples < 2:
+            raise ValueError("init='pca' needs at least two samples with a BMU")
+        covariance = self._scatter(data, batch_size, mean, n_samples)
+        values, vectors = torch.linalg.eigh(covariance / (n_samples - 1))
+        values, vectors = values.flip(0).clamp_min(0), vectors.flip(1)
+        vectors = vectors * vectors.gather(0, vectors.abs().argmax(0, keepdim=True)).sign()
+        first = vectors[:, 0] * values[0].sqrt()
+        second = vectors[:, 1] * values[1].sqrt() if n_features > 1 else torch.zeros_like(first)
+        long_rows = self.n_rows >= self.n_cols  # the longer side along the first component
+        row_axis, col_axis = (first, second) if long_rows else (second, first)
+
+        def positions(n: int) -> torch.Tensor:
+            if n == 1:
+                return torch.zeros(1, dtype=torch.float64, device="cpu")
+            return torch.linspace(-1, 1, n, dtype=torch.float64, device="cpu")
+
+        grid = (
+            mean + positions(self.n_rows)[:, None, None] * row_axis + positions(self.n_cols)[None, :, None] * col_axis
+        )
+        return grid.reshape(self.n_rows * self.n_cols, n_features).float().to(self._device)
+
+    def _compared_batches(self, data: torch.Tensor, batch_size: int) -> Iterator[torch.Tensor]:
+        """The samples with a BMU as the metric compares them, batch by batch, without empty batches.
+
+        Under cosine and correlation, the samples are scaled to unit length (and centred for correlation).
+        """
+        for batch in data.split(batch_size):
+            keep = self._has_bmu(batch)
+            if keep is not None:  # cosine, correlation
+                batch = self._centre(batch[keep])
+                batch = batch / batch.norm(dim=1, keepdim=True).clamp_min(1e-30)
+            if len(batch):
+                yield batch
+
+    def _mean(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, int]:
+        """Mean (float64, on the CPU) and number of the samples with a BMU as the metric compares them.
+
+        Each batch is summed in float32 on the device less the first such sample, so that an offset common to the
+        samples is not rounded however large (equal samples have their exact mean), and the batches' sums in float64
+        on the CPU. A first sample far from the others rounds the mean to about float32's precision at their distance
+        (see issue #29). The mean is 0 without samples.
+        """
+        total = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        first, n_samples = None, 0
+        for values in self._compared_batches(data, batch_size):
+            first = values[0].clone() if first is None else first
+            total += (values - first).sum(0).cpu().double()
+            n_samples += len(values)
+        if first is None:
+            return total, 0
+        return first.cpu().double() + total / n_samples, n_samples
+
+    def _scatter(self, data: torch.Tensor, batch_size: int, mean: torch.Tensor, n_samples: int) -> torch.Tensor:
+        """Sum of squares about the mean of _mean of the samples with a BMU as the metric compares them.
+
+        The matrix sum_i (x_i - m)(x_i - m)^T (float64, on the CPU), with mean and n_samples from _mean. It is summed
+        about the mean rounded to float32, batch by batch, each batch's in float32 on the device and the sum in float64
+        on the CPU, so that large inputs lose no precision, less the part due to the rounding of the mean. The float32
+        products overflow for values of about 1e18 (see issue #30), beyond those a float32 fit handles anyway.
+        """
+        centre = mean.float().to(self._device)
+        total = torch.zeros((data.shape[1],) * 2, dtype=torch.float64, device="cpu")
+        offset = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        for values in self._compared_batches(data, batch_size):
+            centred = values - centre
+            total += (centred.T @ centred).cpu().double()
+            offset += centred.sum(0).cpu().double()
+        return total - offset[:, None] * offset / n_samples
 
     def _has_bmu(self, data: torch.Tensor) -> torch.Tensor | None:
         """Mask of samples with a BMU: non-zero ones (cosine), non-constant ones (correlation); None if all."""
@@ -547,22 +652,30 @@ class SOM:
         weights = self._centre(weights)
         return weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12), None, None
 
-    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Per-node score to minimise: the L1 distance (manhattan), else as in _operands."""
+    def _scorer(self, weights: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
+        """Per-node scores of a batch to minimise: the L1 distance (manhattan), else as in _operands.
+
+        The operands are computed once for all batches: per batch, their n_nodes x n_features copies cost more than
+        small batches' matrix products (on the CPU, 100 x 100 nodes x 1000 features fit 2.3x as fast at 512 samples).
+        """
         if self.metric == "manhattan":
-            return _cdist(batch, weights, 1)
+            return lambda batch: _cdist(batch, weights, 1)
         nodes, bias, centre = self._operands(weights)
         if bias is None:
-            return self._centre(batch) @ nodes.T
+            return lambda batch: self._centre(batch) @ nodes.T
         assert centre is not None  # euclidean has both
-        if batch.device.type == "mps":
+        if weights.device.type == "mps":
             # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
             # further pass over the scores, which is slower at the small batches of large maps; a column of ones in
             # the batch and the node norms in the weights make the bias part of a single matmul. On CUDA addmm fuses
             # the bias into the matmul (cuBLASLt epilogue), so it stays there
-            ones = batch.new_ones(len(batch), 1)
-            return torch.cat([batch - centre, ones], 1) @ torch.cat([nodes, bias[:, None]], 1).T
-        return torch.addmm(bias, batch - centre, nodes.T)
+            extended = torch.cat([nodes, bias[:, None]], 1).T
+            return lambda batch: torch.cat([batch - centre, batch.new_ones(len(batch), 1)], 1) @ extended
+        return lambda batch: torch.addmm(bias, batch - centre, nodes.T)
+
+    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """Per-node score to minimise of one batch (see _scorer)."""
+        return self._scorer(weights)(batch)
 
     def _search(
         self, weights: torch.Tensor, kernel: str | None, top2: bool = False, magnitude: torch.Tensor | None = None
@@ -574,9 +687,10 @@ class SOM:
         "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales.
         """
         if kernel is None:
+            scores = self._scorer(weights)
             if top2:
-                return lambda batch: self._scores(batch, weights).topk(2, 1, largest=False).indices
-            return lambda batch: self._scores(batch, weights).argmin(1)
+                return lambda batch: scores(batch).topk(2, 1, largest=False).indices
+            return lambda batch: scores(batch).argmin(1)
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
         if kernel == "metal-float16":
@@ -647,6 +761,27 @@ class SOM:
         grid = (gaussian(self.n_rows) @ values.view(self.n_rows, -1)).view(self.n_rows, self.n_cols, -1)
         return (gaussian(self.n_cols) @ grid).view(len(values), -1)
 
+    def _sums_cpu(
+        self, data: torch.Tensor, search: Callable[[torch.Tensor], torch.Tensor], n_nodes: int, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sum the samples per node on the CPU, in parts of up to _CPU_SUM_ROWS samples and _CPU_SUM_VALUES values.
+
+        Unlike fit's loop on other devices, each part's BMUs are found batch by batch and its samples added in one
+        index_add_: on the CPU, index_add_ spreads over the threads only for many rows, and adding batch by batch takes
+        several times as long. A part is at least one batch, whose copies the BMU search makes anyway.
+        """
+        sums = data.new_zeros((n_nodes, data.shape[1]))
+        counts = torch.zeros(n_nodes, dtype=torch.long, device=data.device)
+        rows = max(batch_size, min(_CPU_SUM_ROWS, _CPU_SUM_VALUES // data.shape[1]))
+        for part in data.split(rows):
+            bmus = torch.cat([search(batch) for batch in part.split(batch_size)])
+            keep = self._has_bmu(part)
+            if keep is not None:
+                part, bmus = part[keep], bmus[keep]
+            sums.index_add_(0, bmus, part)
+            counts += torch.bincount(bmus, minlength=n_nodes)
+        return sums, counts
+
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
         """Fits the map, starting from the initialisation given by init.
 
@@ -705,37 +840,39 @@ class SOM:
                 fixed_rows = max(1, (1 << 21) // data.shape[1])
         for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
             sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
-            sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
-            # (empty without fixed point)
-            lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)
-            # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
-            counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=weights.device)
             search = self._search(weights, kernel, magnitude=magnitude)
-            for batch in data.split(batch_size):
-                bmus = search(batch)
-                keep = self._has_bmu(batch)
-                if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count them)
-                    batch = batch * keep[:, None]
+            if self._device.type == "cpu":  # always deterministic, so deterministic is False there
+                sums, counts = self._sums_cpu(data, search, n_nodes, batch_size)
+            else:
+                sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
+                lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
+                # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
+                counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=weights.device)
+                for batch in data.split(batch_size):
+                    bmus = search(batch)
+                    keep = self._has_bmu(batch)
+                    if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count)
+                        batch = batch * keep[:, None]
+                    if fixed_point and mps:
+                        _module(self._device, "metal").fixed_sums(batch, bmus, shift, low_shift, sums, lows)
+                    elif fixed_point:  # in parts of 2^21 values, as the float64 and int64 copies take 6x the memory
+                        for rows, part in zip(bmus.split(fixed_rows), batch.split(fixed_rows), strict=True):
+                            value = part.double().mul_(scale)
+                            high = value.round()
+                            sums.index_add_(0, rows, high.long())
+                            lows.index_add_(0, rows, value.sub_(high).mul_(2.0**low_shift).round_().long())
+                            del value, high  # before the next part's copies
+                    elif deterministic:  # on MPS without the Metal kernels a matrix product, in a fixed order
+                        sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
+                    else:
+                        sums.index_add_(0, bmus, batch)
+                    counts.index_add_(
+                        0, bmus, torch.ones_like(bmus, dtype=counts.dtype) if keep is None else keep.to(counts.dtype)
+                    )
                 if fixed_point and mps:
-                    _module(self._device, "metal").fixed_sums(batch, bmus, shift, low_shift, sums, lows)
-                elif fixed_point:  # in parts of 2^21 values, as the float64 and int64 copies take 6x the memory
-                    for rows, part in zip(bmus.split(fixed_rows), batch.split(fixed_rows), strict=True):
-                        value = part.double().mul_(scale)
-                        high = value.round()
-                        sums.index_add_(0, rows, high.long())
-                        lows.index_add_(0, rows, value.sub_(high).mul_(2.0**low_shift).round_().long())
-                        del value, high  # before the next part's copies
-                elif deterministic:  # on MPS without the Metal kernels a matrix product, which sums in a fixed order
-                    sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
-                else:
-                    sums.index_add_(0, bmus, batch)
-                counts.index_add_(
-                    0, bmus, torch.ones_like(bmus, dtype=counts.dtype) if keep is None else keep.to(counts.dtype)
-                )
-            if fixed_point and mps:
-                sums = (sums.float() + lows.float() * 2.0**-low_shift) * 2.0**-low_shift * factors[0] * factors[1]
-            elif fixed_point:
-                sums = (sums / scale + lows / (scale * 2.0**low_shift)).float()
+                    sums = (sums.float() + lows.float() * 2.0**-low_shift) * 2.0**-low_shift * factors[0] * factors[1]
+                elif fixed_point:
+                    sums = (sums / scale + lows / (scale * 2.0**low_shift)).float()
             smoothed = self._smooth(torch.cat([sums, counts[:, None].float()], 1), sigma)
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
             weights = torch.where(denominator > 0, numerator / denominator, weights)

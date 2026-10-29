@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
+  components, centred at the mean, with the longer side of the map along the first component and each side spanning one
+  standard deviation of its component; under cosine and correlation of the samples as these metrics compare them.
+- On the CPU, a fit adds the samples of up to 2^20 samples at once rather than batch by batch, as index_add_ spreads
+  over the threads only for many rows. Sums now add in another order, which changes results only by float rounding.
+- The default batch size on the CPU is 2^22 / max(n_nodes, n_features), from 512 to 65536 (8192 before), so that a
+  batch's scores and its copies stay within about 16 MB each: glibc maps blocks beyond 32 MB afresh on every
+  allocation, and an epoch then takes up to 2-4x as long (twice as long at 10 x 10 nodes x 2000 features). On 200,000
+  samples x 16 and 64 features on an AMD EPYC 7742 with 8 threads, an epoch takes about as long up to 22 x 22 nodes and
+  a third to a half as long from 32 x 32 to 100 x 100 nodes (71 x 71 x 16: 1.74 to 0.55 s). Beyond 16,384 nodes or
+  features, where even 512 samples exceed 32 MB, it stays 8192: with 16 threads at 60 features, an epoch at 512
+  samples takes 0.3x as long as at 8192 at 120 x 120 nodes, but 1.1x as long at 140 x 140 and 1.2x at 200 x 200. On
+  macOS it is 2^24 / max(n_nodes, n_features), from 8192 to 65536: on 200,000 samples x 34 features on an M3 Max, an
+  epoch takes half as long at 10 x 10 nodes (25.5 to 12.9 ms) and a quarter less at 22 x 22.
+- The BMU search without a fused kernel (always on the CPU, on GPUs where none applies) computes the nodes' operands
+  once per search rather than once per batch: on the CPU, 5 epochs at 100 x 100 nodes x 1000 features take 5.2 s
+  rather than 11.4 s.
+
 ## 0.6.0 (2026-10-26)
 
 - Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose

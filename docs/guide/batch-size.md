@@ -19,7 +19,12 @@ On top of it come the data itself, `n_samples x n_features` float32 values on th
 
 With `batch_size=None` (the default):
 
-- On the CPU, the batch size is 8192.
+- On the CPU, it is `2**22 / max(n_nodes, n_features)` samples, from 512 to 65536, so that a batch's score matrix and
+  its copies stay within about 16 MB each: glibc gives blocks beyond 32 MB fresh pages on every allocation, and an epoch
+  then takes up to 2-4x as long on an x86 CPU (an AMD EPYC 7742). Beyond 16,384 nodes or features, where even 512
+  samples exceed 32 MB, it is 8192 samples, as smaller batches only add overhead per batch. On macOS, which does not
+  use glibc, it is `2**24 / max(n_nodes, n_features)` samples, from 8192 to 65536: below about `2**24` scores a few
+  operations per batch dominate (on an M3 Max, an epoch at 10 x 10 nodes takes half as long as at 8192 samples).
 - On CUDA and MPS, it is the largest batch that still helps speed: `2**28 / n_nodes` samples on the torch path and
   `2**26 / n_features` with the fused kernels. It is reduced if that would not fit in `memory_fraction` of the free GPU
   memory. `memory_fraction` defaults to 0.9 on CUDA and 0.5 on MPS, where the free memory is the memory torch
@@ -46,9 +51,10 @@ which takes about 0.25 GiB per copy.
   `PYTORCH_MPS_HIGH_WATERMARK_RATIO`, set before torch is imported.
 - **Very large maps on the torch path:** the score matrix grows with the number of nodes, so a 200 x 200 map holds
   40,000 floats per sample; the default then picks small batches (6,710 samples at 200 x 200 nodes).
-- **The CPU:** the default of 8192 samples does not depend on the map size, so its score matrix takes 29 MB at
-  30 x 30 nodes and 1.3 GB at 200 x 200 nodes; set a smaller `batch_size` for very large maps on machines with little
-  memory.
+- **The CPU:** the default keeps the score matrix at about 16 MB up to 8192 nodes, and at 512 samples up to 16,384
+  nodes. Beyond that even 512 samples exceed 32 MB, so the default takes 8192 (1.3 GB at 200 x 200 nodes): at
+  200 x 200 nodes, an epoch of 250,000 samples x 60 features took 24 s at 8192 samples and 29.5 s at 512 on an AMD
+  EPYC 7742 with 16 threads. Pass a smaller `batch_size` if memory is tight.
 
 ## Other memory to keep in mind
 
