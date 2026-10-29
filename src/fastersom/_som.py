@@ -52,7 +52,7 @@ _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
 # samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu), and their largest number of values: each
-# part is copied by the selection of the samples with a BMU, 64 MB per copy at most
+# part is copied by the selection of the samples with a BMU, 64 MB per copy at most unless a batch is larger
 _CPU_SUM_ROWS = 1 << 20
 _CPU_SUM_VALUES = 1 << 24
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
