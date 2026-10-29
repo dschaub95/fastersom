@@ -560,14 +560,10 @@ class SOM:
         values, vectors = torch.linalg.eigh(covariance / (n_samples - 1))
         values, vectors = values.flip(0).clamp_min(0), vectors.flip(1)
         vectors = vectors * vectors.gather(0, vectors.abs().argmax(0, keepdim=True)).sign()
-        axes = [
-            vectors[:, k] * values[k].sqrt()
-            if k < n_features
-            else torch.zeros(n_features, dtype=torch.float64, device="cpu")
-            for k in range(2)
-        ]
+        first = vectors[:, 0] * values[0].sqrt()
+        second = vectors[:, 1] * values[1].sqrt() if n_features > 1 else torch.zeros_like(first)
         long_rows = self.n_rows >= self.n_cols  # the longer side along the first component
-        row_axis, col_axis = (axes[0], axes[1]) if long_rows else (axes[1], axes[0])
+        row_axis, col_axis = (first, second) if long_rows else (second, first)
 
         def positions(n: int) -> torch.Tensor:
             if n == 1:
