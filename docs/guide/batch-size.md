@@ -51,7 +51,8 @@ which takes about 0.25 GiB per copy.
 - **Very large maps on the torch path:** the score matrix grows with the number of nodes, so a 200 x 200 map holds
   40,000 floats per sample; the default then picks small batches (6,710 samples at 200 x 200 nodes).
 - **The CPU:** the default keeps the score matrix at about 16 MB up to 8192 nodes, and at 512 samples beyond (80 MB
-  at 200 x 200 nodes). For maps that large with many features, `batch_size=8192` can be faster (at 200 x 200 nodes and
+  at 200 x 200 nodes); on macOS at about 64 MB up to 2048 nodes, and at 8192 samples beyond (1.3 GB at 200 x 200
+  nodes). For maps that large with many features, `batch_size=8192` can be faster (at 200 x 200 nodes and
   64 features, an epoch took 24 s at 8192 samples and 34 s at 512 on an AMD EPYC 7742 with 8 threads).
 
 ## Other memory to keep in mind

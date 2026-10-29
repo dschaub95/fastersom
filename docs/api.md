@@ -21,7 +21,7 @@ points, as a {class}`~fastersom.SpanningTree`.
 Parameters
 : `n_rows`, `n_cols` (grid size), `n_epochs`, `sigma_initial`, `sigma_final` (neighbourhood schedule), `init`,
   `metric`, `random_state`, `device`, `batch_size`, `memory_fraction`, `verbose`, `deterministic`, `fused`,
-  `precision`, and keyword only `neighbourhood`, `grid_metric` and `sigma_schedule` (see
+  `precision`, and keyword only `neighbourhood`, `grid_metric`, `sigma_schedule` and `schedule_end` (see
   [](guide/neighbourhoods.md)). See {class}`~fastersom.SOM` and the [user guide](guide/index.md).
 
 Fitting

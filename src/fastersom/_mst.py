@@ -123,7 +123,7 @@ class _TorchSearch:
         self.centre_norm = float(centre.cpu().double().norm())
         rows = np.arange(len(points))
         self.error = self._bound(rows, np.full(len(points), self.norms.max()), np.full(len(points), self.lengths.max()))
-        if self.device.type == "mps":  # the bias as a column of the nodes, for one matrix product as in SOM._scores
+        if self.device.type == "mps":  # the bias as a column of the nodes, for one matrix product as in SOM._scorer
             self.operand = torch.cat([self.nodes, self.bias[:, None]], 1).T
 
     def _bound(self, rows: np.ndarray, radius: np.ndarray, length: np.ndarray) -> np.ndarray:

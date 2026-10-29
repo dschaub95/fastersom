@@ -417,7 +417,7 @@ class SOM:
         s = t / n_epochs, so that sigma_final would be reached one epoch after the last, as in MiniSom and fastersom's
         exponential default, and the last epoch is wider (with a linear decay to 0, sigma_initial / n_epochs). A single
         epoch uses sigma_initial. Defaults to ``"after_last_epoch"`` under the exponential schedule, which keeps the
-        default maps of fastersom 0.6.0, and to ``"last_epoch"`` under the others. Keyword only.
+        width schedule of fastersom 0.6.0, and to ``"last_epoch"`` under the others. Keyword only.
 
     Attributes
     ----------

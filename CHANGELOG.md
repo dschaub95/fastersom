@@ -3,7 +3,9 @@
 ## Unreleased
 
 - New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
-  "Neighbourhoods and width schedules". The defaults are unchanged and give bit-for-bit the same maps as 0.6.0.
+  "Neighbourhoods and width schedules". The defaults keep 0.6.0's neighbourhood and width schedule; on CUDA and MPS
+  they give bit-for-bit the same maps as 0.6.0, and on the CPU maps differ by float rounding through the new summation
+  order (see below).
   - `neighbourhood`: `"gaussian"` (default), `"bubble"` (1 within the radius, inclusive, as FlowSOM and the SOM
     Toolbox), `"triangle"`, `"epanechnikov"` (the SOM Toolbox's `ep`), `"cut_gaussian"` (its `cutgauss`) or
     `"mexican_hat"`, each a function of the grid distance and the width sigma.

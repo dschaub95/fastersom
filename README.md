@@ -63,8 +63,8 @@ Options:
   `"mexican_hat"`), the distance between grid positions (`"euclidean"`, the default, `"chebyshev"` or `"manhattan"`),
   how the width decays (`"exponential"`, the default, `"linear"`, `"inverse"`, or the widths of all epochs as a
   sequence) and whether the last epoch uses `sigma_final` (`"last_epoch"`, the default under linear and inverse) or
-  the schedule would reach it one epoch later (`"after_last_epoch"`, the default under exponential, which keeps its
-  maps unchanged). Under `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch
+  the schedule would reach it one epoch later (`"after_last_epoch"`, the default under exponential, which keeps
+  0.6.0's width schedule). Under `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch
   k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the grid distances.
   FlowSOM's settings are `SOM(10, 10, n_epochs=10, neighbourhood="bubble", grid_metric="chebyshev",
   sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0)`, whose last epoch is a k-means step; the
@@ -142,7 +142,7 @@ the first fit's time in `first_fit_s`; `--library`, `--device` and `--size` run 
 | [XPySom](https://github.com/Manciukic/xpysom) (CuPy) | 30 x 30   | NVIDIA A100    | 8,096               | 0.46 s   | 313 MiB         | 0.169              |
 | XPySom (CuPy)                                        | 30 x 30   | NVIDIA A100    | 65,536              | 0.41 s   | 2088 MiB        | 0.169              |
 | [torchsom](https://github.com/michelin/TorchSOM)     | 30 x 30   | NVIDIA A100    | 1,024               | 22.2 s   | 44 MiB          | 0.175              |
-| fastersom                                            | 30 x 30   | 16 CPU threads | default (8,192)     | 1.8 s    | -               | 0.169              |
+| fastersom                                            | 30 x 30   | 16 CPU threads | 8,192               | 1.8 s    | -               | 0.169              |
 | XPySom (NumPy)                                       | 30 x 30   | 16 CPU threads | 8,096               | 25.6 s   | -               | 0.168              |
 | torchsom                                             | 30 x 30   | 16 CPU threads | 1,024               | 36.2 s   | -               | 0.176              |
 | fastersom                                            | 100 x 100 | NVIDIA A100    | default (480,000)   | 0.18 s   | 298 MiB         | 0.162              |
@@ -150,13 +150,13 @@ the first fit's time in `first_fit_s`; `--library`, `--device` and `--size` run 
 | fastersom                                            | 100 x 100 | NVIDIA A100    | 8,096               | 0.21 s   | 110 MiB         | 0.162              |
 | fastersom, `fused=False`                             | 100 x 100 | NVIDIA A100    | 8,096               | 0.52 s   | 400 MiB         | 0.162              |
 | XPySom (CuPy)                                        | 100 x 100 | NVIDIA A100    | 8,096               | 2.8 s    | 2846 MiB        | 0.162              |
-| fastersom                                            | 100 x 100 | 16 CPU threads | default (8,192)     | 62.4 s   | -               | 0.162              |
+| fastersom                                            | 100 x 100 | 16 CPU threads | 8,192               | 62.4 s   | -               | 0.162              |
 | fastersom                                            | 200 x 200 | NVIDIA A100    | default (1,118,481) | 11.8 s   | 2244 MiB        | 0.380              |
 | fastersom, `fused=False`                             | 200 x 200 | NVIDIA A100    | default (6,710)     | 29.4 s   | 3294 MiB        | 0.380              |
 | fastersom                                            | 200 x 200 | NVIDIA A100    | 8,096               | 12.3 s   | 1346 MiB        | 0.380              |
 | fastersom, `fused=False`                             | 200 x 200 | NVIDIA A100    | 8,096               | 28.7 s   | 3718 MiB        | 0.380              |
 | XPySom (CuPy)                                        | 200 x 200 | NVIDIA A100    | 8,096               | 118.8 s  | 12292 MiB       | 0.380              |
-| fastersom                                            | 200 x 200 | 16 CPU threads | default (8,192)     | 43 min   | -               | 0.380              |
+| fastersom                                            | 200 x 200 | 16 CPU threads | 8,192               | 43 min   | -               | 0.380              |
 
 With less GPU memory fastersom is about 10x faster than XPySom on a 30 x 30 map, 16x faster on a 100 x 100 map
 (with a tenth of the memory) and 10x faster on a 200 x 200 map (with a ninth of the memory), and 14x faster on the CPU.
