@@ -208,6 +208,9 @@ def test_invalid_parameters(data):
         ({"schedule_end": "end"}, "schedule_end"),
         ({"sigma_initial": [1, 2]}, "sigma_initial"),
         ({"sigma_final": 1j}, "sigma_final"),
+        ({"sigma_final": np.complex128(2 + 1j)}, "sigma_final"),
+        ({"sigma_initial": 10**400}, "sigma_initial"),
+        ({"sigma_initial": b"2.5"}, "sigma_initial"),
         ({"sigma_schedule": ["wide"]}, "sigma_schedule"),
         ({"sigma_schedule": (sigma for sigma in [1.0])}, "sigma_schedule"),
     ]:

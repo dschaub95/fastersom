@@ -82,7 +82,9 @@ Any other schedule can be given as the widths themselves, a sequence of `n_epoch
 import numpy as np
 from fastersom import SOM
 
-som = SOM(10, 10, n_epochs=10, sigma_schedule=6 * (1 - (np.arange(10) + 0.5) / 10))  # linear, epoch midpoints
+# FlowSOM's radius in the middle of each of 10 passes, linear from 6 to 0
+widths = 6 * (1 - (np.arange(10) + 0.5) / 10)
+som = SOM(10, 10, n_epochs=10, neighbourhood="bubble", grid_metric="chebyshev", sigma_schedule=widths)
 ```
 
 The defaults are `sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2` and `sigma_final = min(0.1 * sigma_initial, 1)`

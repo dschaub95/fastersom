@@ -185,8 +185,8 @@ def _is_int(value, minimum: int) -> bool:
 def _width(name: str, value) -> float:
     """A neighbourhood width given as any real scalar (also a 0-d array or tensor), as a float finite and >= 0."""
     width = None
-    if not isinstance(value, bool | np.bool_ | str) and np.ndim(value) == 0:
-        with suppress(TypeError, ValueError):  # e.g. complex numbers
+    if not isinstance(value, bool | np.bool_ | str | bytes) and np.ndim(value) == 0 and not np.iscomplexobj(value):
+        with suppress(TypeError, ValueError, OverflowError):  # e.g. None or 10**400
             width = float(value)
     if width is None or not isfinite(width) or width < 0:
         raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
@@ -404,8 +404,7 @@ class SOM:
         s = t / n_epochs, so that sigma_final would be reached one epoch after the last, as in MiniSom and fastersom's
         exponential default, and the last epoch is wider (with a linear decay to 0, sigma_initial / n_epochs). A single
         epoch uses sigma_initial. Defaults to ``"after_last_epoch"`` under the exponential schedule, which keeps the
-        default maps of fastersom 0.6, and to ``"last_epoch"`` under the others. Keyword only.
-
+        default maps of fastersom 0.6.0, and to ``"last_epoch"`` under the others. Keyword only.
 
     Attributes
     ----------

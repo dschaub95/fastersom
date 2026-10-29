@@ -10,7 +10,7 @@
   - `grid_metric`: the distance between grid positions, `"euclidean"` (default), `"chebyshev"` (FlowSOM's) or
     `"manhattan"`.
   - `sigma_schedule`: `"exponential"` (default), `"linear"`, `"inverse"` (MiniSom's asymptotic decay with
-    `sigma_final=sigma_initial / 3`), or the widths of all epochs as a sequence.
+    `sigma_final=sigma_initial / 3` and `schedule_end="after_last_epoch"`), or the widths of all epochs as a sequence.
   - `schedule_end`: `"last_epoch"` makes the last epoch use `sigma_final`; `"after_last_epoch"` makes `sigma_final`
     the width one epoch after the last, as the exponential schedule always has (and still does by default, so that
     the default maps do not change). The linear and inverse schedules end in the last epoch by default: a linear
