@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
+  "Neighbourhoods and width schedules". The defaults are unchanged and give bit-for-bit the same maps as 0.6.0.
+  - `neighbourhood`: `"gaussian"` (default), `"bubble"` (1 within the radius, inclusive, as FlowSOM and the SOM
+    Toolbox), `"triangle"`, `"epanechnikov"` (the SOM Toolbox's `ep`), `"cut_gaussian"` (its `cutgauss`) or
+    `"mexican_hat"`, each a function of the grid distance and the width sigma.
+  - `grid_metric`: the distance between grid positions, `"euclidean"` (default), `"chebyshev"` (FlowSOM's) or
+    `"manhattan"`.
+  - `sigma_schedule`: `"exponential"` (default), `"linear"`, `"inverse"` (MiniSom's asymptotic decay with
+    `sigma_final=sigma_initial / 3`), or the widths of all epochs as a sequence.
+  - `sigma_final=0` is allowed under the linear schedule and any width of 0 leaves only the winner, which makes the
+    epoch a batch k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the
+    grid distances between all pairs of nodes. FlowSOM's settings are `neighbourhood="bubble",
+    grid_metric="chebyshev", sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0`.
+  - The gaussian under euclidean and the bubble under chebyshev factor into the grid axes as before; the other
+    combinations take one Toeplitz matrix product per grid offset at which the neighbourhood is not zero, up to
+    n_nodes^2 x n_features multiply-adds per epoch without holding the n_nodes x n_nodes matrix (on an M3 Max with 35
+    features at most 0.11 s per epoch at 300 x 300 nodes).
+- Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
+  1e-19 gave NaN and left the map unchanged.
+
 ## 0.6.0 (2026-10-26)
 
 - Python 3.12 or newer is required: support for Python 3.11 is dropped, as in the scverse template, whose

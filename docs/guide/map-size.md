@@ -32,12 +32,13 @@ for size in (10, 20, 30):
 
 Each epoch searches the BMU of every sample, `n_samples x n_nodes x n_features` multiply-adds, which dominates the
 time of `fit`; the update costs `n_nodes x (n_rows + n_cols) x n_features`, as the gaussian is applied along the grid
-rows and columns separately. Doubling both sides of the grid thus makes `fit` about four times slower. Memory grows
+rows and columns separately (other neighbourhoods cost more, see [](neighbourhoods.md#cost)). Doubling both sides of the grid thus makes `fit` about four times slower. Memory grows
 with the number of nodes only on the torch path (see [](batch-size.md)).
 
 ## Neighbourhood width
 
-The neighbourhood width $\sigma$ decays exponentially from `sigma_initial` towards `sigma_final`, in grid units. The
+The neighbourhood width $\sigma$ decays exponentially from `sigma_initial` towards `sigma_final`, in grid units (other
+schedules and neighbourhood functions are in [](neighbourhoods.md)). The
 defaults are `sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2` (7.5 for a 30 x 30 map, 2.5 for 10 x 10) and
 `sigma_final = min(0.1 * sigma_initial, 1)`. A large initial width orders the map globally in the first epochs; a small
 final width lets the nodes fit the data locally at the end.

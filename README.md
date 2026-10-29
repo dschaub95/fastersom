@@ -9,7 +9,7 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A small, fast batch self-organising map (SOM) in PyTorch: a reimplementation of Kohonen's batch map with a
-rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhood width. It computes the same batch update as
+rectangular grid, by default with a gaussian neighbourhood and exponentially decaying neighbourhood width. It computes the same batch update as
 [XPySom](https://github.com/Manciukic/xpysom), with a gaussian neighbourhood of initial width half the grid that
 decays to a tenth of that, at most one grid unit. Data stays on the device (CUDA, MPS or CPU) and the per-epoch update smooths per-node sums with the
 separable gaussian, one small matrix product along each grid axis, so an epoch costs little more than one BMU search.
@@ -57,6 +57,15 @@ Options:
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule. `sigma_final` defaults to
   `min(0.1 * sigma_initial, 1)`, so that large maps are not smoothed beyond the resolution of their units;
   `sigma_final=0.1 * sigma_initial` reproduces XPySom's schedule.
+- `neighbourhood`, `grid_metric` and `sigma_schedule` (keyword only) choose the neighbourhood function
+  (`"gaussian"`, the default, `"bubble"`, `"triangle"`, `"epanechnikov"`, `"cut_gaussian"` or `"mexican_hat"`),
+  the distance between grid positions (`"euclidean"`, the default, `"chebyshev"` or `"manhattan"`) and how the width
+  decays (`"exponential"`, the default, `"linear"`, `"inverse"`, or the widths of all epochs as a sequence). Under
+  `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch k-means step.
+  `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the grid distances. FlowSOM's settings
+  are `SOM(neighbourhood="bubble", grid_metric="chebyshev", sigma_schedule="linear", sigma_initial="flowsom",
+  sigma_final=0)`; the [user guide](https://fastersom.readthedocs.io/en/latest/guide/neighbourhoods.html) has the
+  formulas and the settings of MiniSom, XPySom and the SOM Toolbox.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the fused
   [CUDA](#fused-cuda-kernels) or [Metal](#fused-metal-kernels) kernels) without changing the algorithm. On CUDA and MPS
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on
@@ -158,10 +167,10 @@ instead of 0.6 s), and with the kernels cached on disk by an earlier run 0.6 s l
 
 fastersom follows Kohonen's batch map (T. Kohonen, *Self-Organizing Maps*, 3rd ed., Springer, 2001). Each epoch assigns
 every sample to its best matching unit and sets every node to the neighbourhood-weighted mean of the samples, with
-neighbourhood `h(j, k) = exp(-||r_j - r_k||^2 / (2 sigma(t)^2))` on the grid coordinates `r` and
+neighbourhood `h(j, k) = h(d(r_j, r_k); sigma(t))` of the distance `d` between the grid coordinates `r`. By default
+`h` is the gaussian `exp(-d^2 / (2 sigma(t)^2))` of the euclidean distance and
 `sigma(t) = sigma_initial * (sigma_final / sigma_initial) ** (t / n_epochs)`. There is no learning rate, because it
-cancels in the batch update. Only the rectangular topology, gaussian neighbourhood and exponential decay are
-supported.
+cancels in the batch update. Only the rectangular topology is supported.
 
 ## Development
 
