@@ -13,6 +13,9 @@
   samples x 16 and 64 features on an AMD EPYC 7742 with 8 threads, an epoch takes about as long up to 22 x 22 nodes and
   a third to a half as long from 32 x 32 to 100 x 100 nodes (71 x 71 x 16: 1.74 to 0.55 s), but at 200 x 200 nodes x
   64 features about 40% longer (23.7 to 34 s; pass `batch_size=8192` there).
+- The BMU search without a fused kernel (always on the CPU, on GPUs where none applies) computes the nodes' operands
+  once per search rather than once per batch: on the CPU, 5 epochs at 100 x 100 nodes x 1000 features take 5.2 s
+  rather than 11.4 s.
 
 ## 0.6.0 (2026-10-26)
 
