@@ -506,6 +506,14 @@ def test_tensor_cores_on_any_tf32_gpu(fresh, monkeypatch, largest, metric, n_sam
     assert_fused_matches_torch(som, X, "cuda")
 
 
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9), reason="no Ada GPU")
+def test_ada_searches_on_tensor_cores(fused):
+    # Ada GPUs (RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40) take the tensor-core kernel by default
+    X, som = search_case("euclidean", 3001, 34, 30, 30, "cuda")
+    assert som._kernel(34) == "tensor-core"
+    assert_fused_matches_torch(som, X, "cuda")
+
+
 @pytest.mark.parametrize("metric", METRICS)
 @pytest.mark.parametrize(("n_samples", "n_features", "n_rows", "n_cols"), [*SEARCH_SIZES, (700, 64, 5, 5)])
 def test_metal_matches_torch(metal_som, metric, n_samples, n_features, n_rows, n_cols):

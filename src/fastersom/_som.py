@@ -45,10 +45,13 @@ _FUSED_MAX_FEATURES = 128
 # Compute capabilities of data-centre GPUs (A100, H100, B200), whose TF32 tensor cores do about 8x the multiply-adds of
 # their float32 cores, so that three TF32 products per float32 product still win; on GeForce, RTX and L40 GPUs they do
 # 1-2x. There the tensor-core kernel searches dot-product scores at any feature count (on an A100, fit 1.5x faster than
-# with the float32 kernel at 34 features from 100 x 100 nodes, 1.4-1.8x at 128, 1.3-1.8x faster than cuBLAS beyond).
-# The capability does not tell variants with cut-down tensor cores such as the H20 (9.0), where it is likely slower;
-# timing both kernels on the device instead could pick differently from run to run, and so change the map
-_FAST_TF32 = ((8, 0), (9, 0), (10, 0))
+# with the float32 kernel at 34 features from 100 x 100 nodes, 1.4-1.8x at 128, 1.3-1.8x faster than cuBLAS beyond). Ada
+# (8.9) is in the list to be measured: its tensor cores do 2x (RTX 6000 Ada, L40S, L4) or 1x (L40, GeForce RTX 40), so
+# the float32 kernel may well be faster up to 128 features, while beyond them, where cuBLAS writes and rereads the batch
+# x nodes scores, the fused search may still win; untested. The capability does not tell variants with cut-down tensor
+# cores such as the H20 (9.0), where it is likely slower; timing both kernels on the device instead could pick
+# differently from run to run, and so change the map
+_FAST_TF32 = ((8, 0), (8, 9), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
 # samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu), and their largest number of values: each
@@ -218,17 +221,17 @@ class SOM:
     """Batch self-organising map on a rectangular grid with a gaussian neighbourhood.
 
     On CUDA with Triton's Gluon (Triton >= 3.5, part of torch's Linux wheels from torch 2.9), the BMU search of fit,
-    predict, quantization_error and topographic_error runs in a fused kernel that never stores the batch x nodes
-    scores: under manhattan always, under the other metrics up to 128 features, beyond which cuBLAS's matrix product is
-    as fast. It computes in float32 like the torch path, so the BMUs differ only on near-ties. On A100, H100 and B200
-    GPUs, the other metrics' search instead runs on tensor cores at any feature count (for maps of over 64 nodes and
-    nodes x features >= 8192), with float32 accuracy from three TF32 products per product (3xTF32); its BMUs too
-    differ only on near-ties, and match float64's more often than float32's. The first use of a feature count compiles
-    the kernel (2-4 s the first time, cached on disk by Triton), which needs a C compiler and the Python headers, and
-    checks it on a tiny search; a kernel that fails warns and leaves the next one (tensor cores, float32 kernel, torch
-    path). On MPS (torch >= 2.6) the search runs in fused Metal kernels, in float32 on the simdgroup matrix units (on
-    the ALUs under manhattan, up to 512 features), compiled at runtime in about 0.2 s per feature count and checked in
-    the same way.
+    predict, quantization_error and topographic_error runs in a fused kernel that never stores the batch x nodes scores:
+    under manhattan always, under the other metrics up to 128 features, beyond which cuBLAS's matrix product is as fast.
+    It computes in float32 like the torch path, so the BMUs differ only on near-ties. On A100, H100, B200 and Ada GPUs
+    (such as the RTX 6000 Ada and L40S), the other metrics' search instead runs on tensor cores at any feature count
+    (for maps of over 64 nodes and nodes x features >= 8192), with float32 accuracy from three TF32 products per product
+    (3xTF32); its BMUs too differ only on near-ties, and match float64's more often than float32's. The first use of a
+    feature count compiles the kernel (2-4 s the first time, cached on disk by Triton), which needs a C compiler and the
+    Python headers, and checks it on a tiny search; a kernel that fails warns and leaves the next one (tensor cores,
+    float32 kernel, torch path). On MPS (torch >= 2.6) the search runs in fused Metal kernels, in float32 on the
+    simdgroup matrix units (on the ALUs under manhattan, up to 512 features), compiled at runtime in about 0.2 s per
+    feature count and checked in the same way.
 
     Parameters
     ----------
