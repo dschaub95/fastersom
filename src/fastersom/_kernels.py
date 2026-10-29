@@ -7,8 +7,10 @@ as a sum of outer products over the features in float32, and only the best node 
 Gluon sets the tiling explicitly: 8 x 8 scores per thread take 16 loads per 64 multiply-adds, whereas plain Triton
 gives each thread a column of samples for one node, a load per multiply-add, at under half the speed.
 
-On GPUs whose TF32 tensor cores far outpace their float32 cores, dot-product scores instead come from _tc_kernel, a
-plain Triton kernel of the same structure on tensor cores, as 3xTF32 (three TF32 products per float32 product).
+On the GPUs of fastersom._som._FAST_TF32, most of whose TF32 tensor cores far outpace their float32 cores, dot-product
+scores instead come from _tc_kernel, a plain Triton kernel of the same structure on tensor cores, as 3xTF32 (three TF32
+products per float32 product). Its loop over the features takes chunks of 32 where their pipeline buffers fit in a
+block's shared memory, else of 16.
 """
 
 from collections.abc import Callable
@@ -19,6 +21,7 @@ import triton
 import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.runtime.errors import OutOfResources
 
 if not hasattr(gl, "static_range"):  # Gluon of Triton 3.4 (torch 2.8) lacks it
     raise ImportError("fastersom's fused kernels need Triton >= 3.5")
@@ -32,6 +35,11 @@ _TC_BLOCK = 128  # samples and nodes per tile of the tensor-core kernel, with 8 
 _PAD = 128  # samples and nodes are padded to a multiple of every tile
 # features per chunk of the tensor-core kernel at least: Triton before 3.8 takes dots of float32 over 16 or more only
 _TC_MIN_K = 8 if tuple(map(int, triton.__version__.split(".")[:2])) >= (3, 8) else 16
+# features per chunk of the tensor-core loop at most, per device: 32, or 16 where the pipeline buffers of chunks of 32
+# exceed a block's shared memory, which Triton tells when it launches the kernel. Compiled by Triton 3.8, chunks of 32
+# take 128-144 KB for compute capability 8.x, within the A100's 163 KB but not the 99 KB of Ada (8.9) and consumer
+# Ampere (8.6), and 240 KB for 10.0, beyond the B200's 227 KB; chunks of 16 take at most 120 KB
+_TC_LOOP_K: dict[torch.device, int] = {}
 # counts that only bound masks and loops; Triton would otherwise compile a variant each for a count of 1, a multiple of
 # 16 and others, e.g. again for a fit's last batch or a single sample
 _COUNTS = ["n_samples", "n_nodes"]
@@ -226,13 +234,13 @@ def _tc_kernel(
     _store(bmu_ptr, score_ptr, rows, n_samples, best, best_node, second, second_node, TOP2)
 
 
-def _tc_chunks(width: int) -> tuple[int, int, int, int]:
+def _tc_chunks(width: int, largest: int = 32) -> tuple[int, int, int, int]:
     """Split a multiple of 8 features into the chunks of the tensor-core loop.
 
     (chunks in the pipelined loop, their size, chunks of 16, of 8) of a multiple of 8 features: a loop over chunks
-    of 32, the fastest on an A100 from 34 to 256 features (16 below 32 features).
+    of 32, the fastest on an A100 from 34 to 256 features (16 below 32 features, or if largest is 16).
     """
-    size = 32 if width >= 32 else 16
+    size = min(largest, 32 if width >= 32 else 16)
     n_loop, rest = divmod(width, size)
     return n_loop, size, rest // 16, rest % 16 // 8
 
@@ -303,6 +311,29 @@ def _padded(x: torch.Tensor, centre: torch.Tensor | None, tensor_cores: bool, no
     return out
 
 
+def _tc_launch(grid: tuple[int, int], args: tuple, split_nodes: int, largest: int, bias: bool, top2: bool) -> None:
+    """Launch _tc_kernel on args (x, w, ...) of _bmus, in chunks of at most largest features."""
+    x, w = args[0], args[1]
+    n_loop, loop_k, n16, n8 = _tc_chunks(x.shape[2], largest)
+    _tc_kernel[grid](
+        *args,
+        x.shape[2],
+        w.stride(1),
+        x.stride(0),
+        w.stride(0),
+        split_nodes,
+        n_loop,
+        n_loop > 0,
+        loop_k,
+        n16,
+        n8,
+        bias,
+        top2,
+        _TC_BLOCK,
+        num_warps=8,
+    )
+
+
 @cache
 def _n_programs(device: torch.device) -> int:
     return 8 * torch.cuda.get_device_properties(device).multi_processor_count
@@ -333,24 +364,15 @@ def _bmus(
     args = (x, w, w if bias is None else bias, bmu, score, n_samples, n_nodes)  # the bias is not read without one
     with torch.cuda.device(x.device):  # Triton launches on the current device
         if tensor_cores:
-            n_loop, loop_k, n16, n8 = _tc_chunks(x.shape[2])
-            _tc_kernel[(n_blocks, n_splits)](
-                *args,
-                x.shape[2],
-                w.stride(1),
-                x.stride(0),
-                w.stride(0),
-                tiles_per_split * block_n,
-                n_loop,
-                n_loop > 0,
-                loop_k,
-                n16,
-                n8,
-                bias is not None,
-                top2,
-                _TC_BLOCK,
-                num_warps=8,
-            )
+            grid, split_nodes = (n_blocks, n_splits), tiles_per_split * block_n
+            largest = _TC_LOOP_K.get(x.device, 32)
+            try:
+                _tc_launch(grid, args, split_nodes, largest, bias is not None, top2)
+            except OutOfResources:  # raised before the kernel runs, which leaves bmu and score as they were
+                if largest == 16 or x.shape[2] < 32:  # already in chunks of 16
+                    raise
+                _TC_LOOP_K[x.device] = 16  # for the device's self-checks and searches from now on
+                _tc_launch(grid, args, split_nodes, 16, bias is not None, top2)
         else:
             _bmu_kernel[(n_blocks, n_splits)](
                 *args,

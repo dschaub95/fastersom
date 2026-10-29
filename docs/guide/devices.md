@@ -40,16 +40,21 @@ float rounding (BMUs can differ on near-ties).
 On CUDA with Triton >= 3.5, which torch's Linux wheels include from torch 2.9, the search runs in one of two fused
 kernels:
 
-- On GPUs of compute capability 8.0, 9.0 and 10.0 (A100, H100, B200), under the euclidean, cosine and correlation
-  metrics, for maps of over 64 nodes and `n_nodes x n_features >= 8192`, a kernel on the tensor cores at any feature
-  count. It is accurate to float32 by computing every product from three TF32 products (3xTF32).
+- On GPUs of compute capability 8.0, 9.0 and 10.0 (A100, H100, B200) at any feature count, and on Ada GPUs (8.9, such
+  as the RTX 6000 Ada, L40S, L4 and RTX 4090) from 128 features on, under the euclidean, cosine and correlation metrics,
+  for maps of over 64 nodes and `n_nodes x n_features >= 8192`, a kernel on the tensor cores. On an RTX 6000 Ada it was
+  slower than the float32 kernel below 128 features (a fit at 34 features took 1.1-1.9x as long) and 1.4-1.8x as fast
+  as cuBLAS from 196 features on. It is accurate to float32 by
+  computing every product from three TF32 products (3xTF32).
 - Otherwise a float32 kernel: under manhattan at any feature count, and under the other metrics up to 128 features,
   beyond which cuBLAS's matrix product is as fast and the torch path is used.
 
-On an A100, this makes `fit` under euclidean 2.3-3x faster than the torch path from 30 x 30 to 200 x 200 nodes, with
-a third to a sixth of the memory, and 240x faster under manhattan, whose torch path takes `torch.cdist`. Only the A100
-has been tested; GPUs that report compute capability 9.0 with cut-down tensor cores, such as the H20, also get the
-tensor-core kernel, which is likely slower there.
+On an A100, this makes `fit` under euclidean 2.3-3x faster than the torch path from 30 x 30 to 200 x 200 nodes, with a
+third to a sixth of the memory, and 240x faster under manhattan, whose torch path takes `torch.cdist`. Only the A100 has
+been tested. On Ada GPUs, whose TF32 tensor cores do 2x the multiply-adds of their float32 cores (1x on the L40 and
+GeForce RTX 40 cards) rather than the A100's 8x, the tensor-core kernel may be no faster than the float32 kernel. GPUs
+that report compute capability 9.0 with cut-down tensor cores, such as the H20, also get the tensor-core kernel, which
+is likely slower there.
 
 The first use of a feature count compiles its kernel, in 2-4 s; Triton caches it on disk for later processes.
 Compiling needs a C compiler and the Python headers (for example the `python3-dev` package, or a Python installed by

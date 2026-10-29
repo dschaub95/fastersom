@@ -35,9 +35,9 @@ quantization and topographic errors) rather than bit for bit.
 ## Precision
 
 fastersom computes in float32 by default (`precision="float32"`) on every device: the data and the nodes are float32,
-and so are the BMU search and the update. On A100, H100 and B200 GPUs, the fused CUDA kernel uses the tensor cores
-with three TF32 products per float32 product (3xTF32), which keeps float32 accuracy (see [](devices.md)). The BMUs of
-the fused kernels and of the torch path differ only on near-ties.
+and so are the BMU search and the update. On A100, H100 and B200 GPUs (and on Ada GPUs from 128 features), the fused
+CUDA kernel uses the tensor cores with three TF32 products per float32 product (3xTF32), which keeps float32 accuracy (see [](devices.md)). The
+BMUs of the fused kernels and of the torch path differ only on near-ties.
 
 ### `precision="float16"`
 
