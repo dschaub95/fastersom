@@ -488,6 +488,24 @@ def test_fused_matches_torch(fused, metric, n_samples, n_features, n_rows, n_col
     assert_fused_matches_torch(som, X, "cuda")
 
 
+@pytest.mark.parametrize("largest", [32, 16])
+@pytest.mark.parametrize("metric", ["euclidean", "cosine", "correlation"])
+@pytest.mark.parametrize(("n_samples", "n_features", "n_rows", "n_cols"), [(3001, 34, 30, 30), (1500, 196, 9, 9)])
+def test_tensor_cores_on_any_tf32_gpu(fresh, monkeypatch, largest, metric, n_samples, n_features, n_rows, n_cols):
+    # the tensor-core kernel, made available here, on any GPU with TF32 tensor cores (compute capability 8.0 on), in
+    # chunks of up to 32 or 16 features: it fits the device's shared memory (with chunks of 16 where those of 32 do not,
+    # as on Ada's 99 KB), passes its self-check without a warning (an error under pytest's settings) and finds the torch
+    # path's BMUs up to near-ties
+    if torch.cuda.get_device_capability() < (8, 0):
+        pytest.skip("no TF32 tensor cores")
+    kernels = fresh._triton(torch.device("cuda"))
+    monkeypatch.setattr(fresh, "_FAST_TF32", [torch.cuda.get_device_capability()])
+    monkeypatch.setattr(kernels, "_TC_LOOP_K", {torch.device("cuda", torch.cuda.current_device()): largest})
+    X, som = search_case(metric, n_samples, n_features, n_rows, n_cols, "cuda")
+    assert som._kernel(n_features) == "tensor-core"
+    assert_fused_matches_torch(som, X, "cuda")
+
+
 @pytest.mark.parametrize("metric", METRICS)
 @pytest.mark.parametrize(("n_samples", "n_features", "n_rows", "n_cols"), [*SEARCH_SIZES, (700, 64, 5, 5)])
 def test_metal_matches_torch(metal_som, metric, n_samples, n_features, n_rows, n_cols):

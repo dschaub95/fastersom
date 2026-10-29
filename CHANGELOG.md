@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- On CUDA, the tensor-core kernel loops over chunks of 16 features instead of 32 on GPUs whose blocks lack the shared
+  memory for the pipeline buffers of chunks of 32, as Triton reports when it launches the kernel. Compiled by Triton 3.8
+  for compute capability 10.0 (B200), chunks of 32 take 240 KB of shared memory, beyond its 227 KB, so that there the
+  kernel should have failed its self-check from 25 features, warned and left the float32 kernel or the torch path; for
+  8.x they take 128-144 KB, beyond the 99 KB of Ada and consumer Ampere GPUs. Chunks of 16 take at most 120 KB.
+  Untested on these GPUs: the sizes come from compiling the kernel for them without a GPU.
+
 ## 0.7.0 (2026-10-29)
 
 - `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
