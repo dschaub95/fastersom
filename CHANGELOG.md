@@ -9,9 +9,10 @@
   8.x they take 128-144 KB, beyond the 99 KB of Ada and consumer Ampere GPUs. Chunks of 16 take at most 120 KB.
   Untested on these GPUs: the sizes come from compiling the kernel for them without a GPU.
 - On CUDA, Ada GPUs (compute capability 8.9: RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40 series) search under
-  euclidean, cosine and correlation on tensor cores, as A100, H100 and B200 GPUs do, in chunks of 16 features.
-  Untested: their TF32 tensor cores do 2x the multiply-adds of their float32 cores (1x on the L40 and GeForce cards),
-  against the A100's 8x, so the 3xTF32 kernel may be no faster there than the float32 kernel.
+  euclidean, cosine and correlation on tensor cores from 128 features on, in chunks of 16 features. Measured on an RTX
+  6000 Ada (500,000 samples, 10 epochs): below 128 features the float32 kernel is faster (a fit at 34 features took
+  1.1-1.9x as long on tensor cores), at 128 they are even or faster (0.81-0.98x), and from 196 to 512 features a fit
+  takes 0.56-0.72x as long as with cuBLAS; the BMUs agree with the torch path's up to near-ties (at least 0.99998).
 
 ## 0.7.0 (2026-10-29)
 

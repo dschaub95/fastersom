@@ -40,9 +40,11 @@ float rounding (BMUs can differ on near-ties).
 On CUDA with Triton >= 3.5, which torch's Linux wheels include from torch 2.9, the search runs in one of two fused
 kernels:
 
-- On GPUs of compute capability 8.0, 8.9, 9.0 and 10.0 (A100; Ada, such as the RTX 6000 Ada, L40S, L4 and RTX 4090;
-  H100; B200), under the euclidean, cosine and correlation metrics, for maps of over 64 nodes and
-  `n_nodes x n_features >= 8192`, a kernel on the tensor cores at any feature count. It is accurate to float32 by
+- On GPUs of compute capability 8.0, 9.0 and 10.0 (A100, H100, B200) at any feature count, and on Ada GPUs (8.9, such
+  as the RTX 6000 Ada, L40S, L4 and RTX 4090) from 128 features on, under the euclidean, cosine and correlation metrics,
+  for maps of over 64 nodes and `n_nodes x n_features >= 8192`, a kernel on the tensor cores. On an RTX 6000 Ada it was
+  slower than the float32 kernel below 128 features (a fit at 34 features took 1.1-1.9x as long) and 1.4-1.8x as fast
+  as cuBLAS from 196 features on. It is accurate to float32 by
   computing every product from three TF32 products (3xTF32).
 - Otherwise a float32 kernel: under manhattan at any feature count, and under the other metrics up to 128 features,
   beyond which cuBLAS's matrix product is as fast and the torch path is used.

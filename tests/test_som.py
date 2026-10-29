@@ -481,7 +481,7 @@ def test_fused_matches_torch(fused, metric, n_samples, n_features, n_rows, n_col
     X, som = search_case(metric, n_samples, n_features, n_rows, n_cols, "cuda")
     n_nodes = n_rows * n_cols
     if metric != "manhattan" and n_nodes > 64 and n_nodes * n_features >= 8192:
-        fast_tf32 = torch.cuda.get_device_capability() in fused._FAST_TF32
+        fast_tf32 = fused._tensor_cores(torch.cuda.get_device_capability(), n_features)
         assert som._kernel(n_features) == ("tensor-core" if fast_tf32 else "float32" if n_features <= 128 else None)
     else:
         assert som._kernel(n_features) == ("float32" if metric == "manhattan" or n_features <= 128 else None)
@@ -507,10 +507,13 @@ def test_tensor_cores_on_any_tf32_gpu(fresh, monkeypatch, largest, metric, n_sam
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 9), reason="no Ada GPU")
-def test_ada_searches_on_tensor_cores(fused):
-    # Ada GPUs (RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40) take the tensor-core kernel by default
+def test_ada_searches_on_tensor_cores_from_128_features(fused):
+    # Ada GPUs (RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40) take the float32 kernel below 128 features and the
+    # tensor-core kernel from 128 on
     X, som = search_case("euclidean", 3001, 34, 30, 30, "cuda")
-    assert som._kernel(34) == "tensor-core"
+    assert som._kernel(34) == "float32"
+    X, som = search_case("euclidean", 1500, 196, 9, 9, "cuda")
+    assert som._kernel(196) == "tensor-core"
     assert_fused_matches_torch(som, X, "cuda")
 
 
@@ -736,7 +739,7 @@ def test_fused_compile_failure_falls_back(data, fresh, monkeypatch):
 
 def test_fused_self_check_ignores_torch_defaults(fresh):
     som = SOM.from_weights(np.eye(900, 34, dtype=np.float32), 30, 30, device="cuda")
-    expected = "tensor-core" if torch.cuda.get_device_capability() in fresh._FAST_TF32 else "float32"
+    expected = "tensor-core" if fresh._tensor_cores(torch.cuda.get_device_capability(), 34) else "float32"
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float64)
     try:
