@@ -32,8 +32,9 @@ for size in (10, 20, 30):
 
 Each epoch searches the BMU of every sample, `n_samples x n_nodes x n_features` multiply-adds, which dominates the
 time of `fit`; the update costs `n_nodes x (n_rows + n_cols) x n_features`, as the gaussian is applied along the grid
-rows and columns separately (other neighbourhoods cost more, see [](neighbourhoods.md#cost)). Doubling both sides of the grid thus makes `fit` about four times slower. Memory grows
-with the number of nodes only on the torch path (see [](batch-size.md)).
+rows and columns separately (other neighbourhoods cost more, see [](neighbourhoods.md#cost)). Doubling both sides
+of the grid thus makes `fit` about four times slower. Memory grows with the number of nodes only on the torch path
+(see [](batch-size.md)).
 
 ## Neighbourhood width
 

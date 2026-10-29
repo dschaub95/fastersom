@@ -27,8 +27,9 @@ topographic error and the U-matrix always count the 8 surrounding nodes as neigh
 
 ## Neighbourhood functions
 
-`neighbourhood` sets $h(d; \sigma)$. For all of them $\sigma$ is in grid units: the standard deviation of the gaussians
-and the radius of the others. A constant factor in $h$ would cancel in the update, so none is normalised.
+`neighbourhood` sets $h(d; \sigma)$. For all of them $\sigma$ is in grid units: the standard deviation of the gaussian
+and the mexican hat, the radius of the others, and both for the cut gaussian. A constant factor in $h$ would cancel in
+the update, so none is normalised.
 
 | `neighbourhood` | $h(d; \sigma)$ | zero for |
 | --- | --- | --- |
@@ -50,8 +51,8 @@ data. Nodes whose denominator is 0 or negative keep their weights.
 
 ## Width schedules
 
-`sigma_schedule` sets how $\sigma$ moves from `sigma_initial` ($\sigma_0$) towards `sigma_final` ($\sigma_1$), with
-$s = t / n_\text{epochs}$:
+`sigma_schedule` sets how $\sigma$ moves from `sigma_initial` ($\sigma_0$) to `sigma_final` ($\sigma_1$), with $s$
+running from 0 in the first epoch to 1 at the end set by `schedule_end`:
 
 | `sigma_schedule` | $\sigma(t)$ | requires |
 | --- | --- | --- |
@@ -59,18 +60,29 @@ $s = t / n_\text{epochs}$:
 | `"linear"` | $\sigma_0 + (\sigma_1 - \sigma_0)\, s$ | $\sigma_0, \sigma_1 \ge 0$ |
 | `"inverse"` | $\sigma_0 / \left(1 + (\sigma_0 / \sigma_1 - 1)\, s\right)$ | $\sigma_0, \sigma_1 > 0$ |
 
-The first epoch uses $\sigma_0$, and $\sigma_1$ is the value the schedule would reach at $t = n_\text{epochs}$, one
-epoch after the last, so the last epoch uses a slightly larger width. With `sigma_final=0` under `"linear"` the last
-epoch uses $\sigma_0 / n_\text{epochs}$.
+An exponential or inverse decay never reaches 0, so a schedule that ends at width 0 is linear (or given as a sequence,
+below).
+
+| `schedule_end` | $s$ | last epoch |
+| --- | --- | --- |
+| `"last_epoch"` (default under linear and inverse) | $t / (n_\text{epochs} - 1)$ | $\sigma_1$ |
+| `"after_last_epoch"` (default under exponential) | $t / n_\text{epochs}$ | wider than $\sigma_1$ |
+
+With `"last_epoch"` the last epoch uses `sigma_final`: with `sigma_final=0` it updates every node from its own samples
+only, a step of batch k-means. With `"after_last_epoch"`, $\sigma_1$ is the width the schedule would reach one epoch
+after the last, as in MiniSom: a linear decay to 0 then ends at $\sigma_0 / n_\text{epochs}$, which on a large map is
+still several units (with FlowSOM's initial radius and 10 epochs 2.9 units at 50 x 50 nodes, 4.6 at 80 x 80).
+fastersom's exponential default has always ended after the last epoch, and keeps doing so, so that its maps do not
+change. A single epoch uses $\sigma_0$ under either end.
 
 Any other schedule can be given as the widths themselves, a sequence of `n_epochs` values $\ge 0$, with
-`sigma_initial` and `sigma_final` left at `None`:
+`sigma_initial`, `sigma_final` and `schedule_end` left at `None`:
 
 ```python
 import numpy as np
+from fastersom import SOM
 
-t = np.arange(10)
-som = SOM(10, 10, n_epochs=10, sigma_schedule=2.5 * (1 - t / 9))  # linear, reaching 0 in the last epoch
+som = SOM(10, 10, n_epochs=10, sigma_schedule=6 * (1 - (np.arange(10) + 0.5) / 10))  # linear, epoch midpoints
 ```
 
 The defaults are `sigma_initial = ceil(min(n_rows, n_cols) / 2) / 2` and `sigma_final = min(0.1 * sigma_initial, 1)`
@@ -96,34 +108,37 @@ FlowSOM (R) {cite:p}`Van_Gassen_2015`
       sigma_initial="flowsom", sigma_final=0)
   ```
 
-  This keeps the radius of each pass's start for the whole epoch. FlowSOM shrinks it after every sample, so that over
-  most of a pass it is a little smaller; its width in the middle of each pass is
-  `sigma_schedule=6 * (1 - (np.arange(10) + 0.5) / 10)` (for 10 x 10 nodes and `rlen=10`). Once below 1, FlowSOM's
-  radius is set to 0.5, which like any radius below 1 leaves only the winner. FlowSOM numbers its nodes along `xdim`
-  first, so its `xdim` corresponds to `n_cols`.
+  The radius falls from 6 (for 10 x 10 nodes) in the first epoch to 0 in the last, which is a batch k-means step,
+  and stays fixed within each epoch. FlowSOM shrinks it after every sample instead, from 6 at the start of the first
+  pass to almost 0 at the end of the last; its radius at the start of every pass is that of
+  `schedule_end="after_last_epoch"`, and its radius in the middle of every pass is the sequence in the example above
+  (for `rlen=10`). Once below 1, FlowSOM's radius is set to 0.5, which like any radius below 1 leaves only the winner.
+  FlowSOM numbers its nodes along `xdim` first, so its `xdim` corresponds to `n_cols`.
 
 MiniSom
 : The gaussian (on the euclidean grid distance) and the mexican hat match. MiniSom's bubble updates the nodes with
   $\lvert\Delta_r\rvert < \sigma$ and $\lvert\Delta_c\rvert < \sigma$, the chebyshev bubble with a radius just below
   $\sigma$ (for an integer $\sigma$, `bubble` with $\sigma - 1$). MiniSom's triangle is the product of a triangle along
-  the rows and one along the columns, which none of the functions here is. Its sigma decays correspond to
-  `sigma_schedule="inverse"` with `sigma_final=sigma_initial / 3` (`asymptotic_decay`, the default) or
-  `sigma_final=1` (`inverse_decay_to_one`), and to `sigma_schedule="linear"` with `sigma_final=1`
-  (`linear_decay_to_one`). MiniSom's batch training mixes the new weights with the old ones by its learning rate, so
-  it matches the batch map only with a learning rate of 1 that does not decay.
+  the rows and one along the columns, which none of the functions here is. Its sigma decays end after the last
+  iteration and correspond, with `schedule_end="after_last_epoch"`, to `sigma_schedule="inverse"` with
+  `sigma_final=sigma_initial / 3` (`asymptotic_decay`, the default) or `sigma_final=1` (`inverse_decay_to_one`), and
+  to `sigma_schedule="linear"` with `sigma_final=1` (`linear_decay_to_one`). MiniSom's batch training mixes the new weights with the old ones by its
+  learning rate, so it matches the batch map only with a learning rate of 1 that does not decay.
 
 XPySom {cite:p}`Mancini_2020`
 : The gaussian and the mexican hat with `std_coeff * sigma` (by default half its `sigma`) as $\sigma$, and the
   exponential schedule from `std_coeff * sigma` to `std_coeff * sigmaN`, or to a tenth of the initial width with
-  `sigmaN=0`, as fastersom's default before version 0.6.0. Its bubble and triangle are MiniSom's, with `sigma` itself
-  as the width. Its linear schedule reaches `sigmaN` in the last epoch, which takes the widths as a sequence, as in the
-  example above. XPySom keeps a node only where its denominator is 0, and divides by negative ones of the mexican
-  hat, where fastersom keeps the node.
+  `sigmaN=0`, as fastersom's default before version 0.6.0. Its `asymptotic` decay is `sigma_schedule="inverse"` with
+  `sigma_final=sigma_initial / 3` and `schedule_end="after_last_epoch"`. Its bubble and triangle are MiniSom's, with
+  `sigma` itself as the width. Its linear schedule reaches `sigmaN` in the last epoch, as `sigma_schedule="linear"` does
+  by default. XPySom keeps a node only where its denominator is 0, and divides by negative ones of the mexican hat,
+  where fastersom keeps the node.
 
 SOM Toolbox {cite:p}`Vesanto_2000`
 : The batch map's `gaussian`, `cutgauss`, `ep` and `bubble` are `"gaussian"`, `"cut_gaussian"`, `"epanechnikov"` and
   `"bubble"` on the euclidean grid distance (with `'lattice', 'rect'`; its default lattice is hexagonal), with a
-  radius that decreases linearly and reaches `radius_fin` in the last epoch, which takes the widths as a sequence.
+  radius that decreases linearly and reaches `radius_fin` in the last epoch, as `sigma_schedule="linear"` does by
+  default.
 
 ## Cost
 
@@ -131,7 +146,8 @@ The gaussian on the euclidean grid distance and the bubble on the chebyshev one 
 one along the columns, so the update takes one small matrix product along each grid axis, about
 `n_nodes x (n_rows + n_cols) x n_features` multiply-adds per epoch. The other combinations take one matrix product per
 offset along the shorter grid axis at which the neighbourhood is not zero, up to `n_nodes^2 x n_features`
-multiply-adds per epoch, without ever holding the `n_nodes x n_nodes` matrix. This is still small next to the BMU
-search, `n_samples x n_nodes x n_features`, whenever there are more samples than nodes: on an M3 Max with 35 features,
-at most 0.11 s per epoch at 300 x 300 nodes (gaussian on the chebyshev distance with $\sigma = 75$) and 3 ms with a
-triangle of radius 1.
+multiply-adds per epoch, holding one Toeplitz matrix of `max(n_rows, n_cols)^2` floats at a time (on a `1 x n` map
+that is the whole `n_nodes x n_nodes` matrix). Where only the winner has a weight, such as for the bubble below a
+radius of 1, the update skips the product. This is still small next to the BMU search, `n_samples x n_nodes x
+n_features`, whenever there are more samples than nodes: on an M3 Max with 35 features, at most 0.11 s per epoch at
+300 x 300 nodes (gaussian on the chebyshev distance with $\sigma = 75$) and 3 ms with a triangle of radius 1.

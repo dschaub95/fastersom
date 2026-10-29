@@ -57,15 +57,18 @@ Options:
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule. `sigma_final` defaults to
   `min(0.1 * sigma_initial, 1)`, so that large maps are not smoothed beyond the resolution of their units;
   `sigma_final=0.1 * sigma_initial` reproduces XPySom's schedule.
-- `neighbourhood`, `grid_metric` and `sigma_schedule` (keyword only) choose the neighbourhood function
-  (`"gaussian"`, the default, `"bubble"`, `"triangle"`, `"epanechnikov"`, `"cut_gaussian"` or `"mexican_hat"`),
-  the distance between grid positions (`"euclidean"`, the default, `"chebyshev"` or `"manhattan"`) and how the width
-  decays (`"exponential"`, the default, `"linear"`, `"inverse"`, or the widths of all epochs as a sequence). Under
-  `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch k-means step.
-  `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the grid distances. FlowSOM's settings
-  are `SOM(neighbourhood="bubble", grid_metric="chebyshev", sigma_schedule="linear", sigma_initial="flowsom",
-  sigma_final=0)`; the [user guide](https://fastersom.readthedocs.io/en/latest/guide/neighbourhoods.html) has the
-  formulas and the settings of MiniSom, XPySom and the SOM Toolbox.
+- `neighbourhood`, `grid_metric`, `sigma_schedule` and `schedule_end` (keyword only) choose the neighbourhood
+  function (`"gaussian"`, the default, `"bubble"`, `"triangle"`, `"epanechnikov"`, `"cut_gaussian"` or
+  `"mexican_hat"`), the distance between grid positions (`"euclidean"`, the default, `"chebyshev"` or `"manhattan"`),
+  how the width decays (`"exponential"`, the default, `"linear"`, `"inverse"`, or the widths of all epochs as a
+  sequence) and whether the last epoch uses `sigma_final` (`"last_epoch"`, the default under linear and inverse) or
+  the schedule would reach it one epoch later (`"after_last_epoch"`, the default under exponential, which keeps its
+  maps unchanged). Under `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch
+  k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the grid distances.
+  FlowSOM's settings are `SOM(10, 10, n_epochs=10, neighbourhood="bubble", grid_metric="chebyshev",
+  sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0)`, whose last epoch is a k-means step; the
+  [user guide](https://fastersom.readthedocs.io/en/latest/guide/neighbourhoods.html) has the formulas and the settings
+  of MiniSom, XPySom and the SOM Toolbox.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the fused
   [CUDA](#fused-cuda-kernels) or [Metal](#fused-metal-kernels) kernels) without changing the algorithm. On CUDA and MPS
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on

@@ -89,12 +89,15 @@ def reference_som(
     """Kohonen's batch map written out per sample in float64, from the given or fastersom's seeded random weights."""
     weights = random_init(n_rows, n_cols, X.shape[1], seed) if weights is None else weights.astype(np.float64)
     X = X.astype(np.float64)
+    # the default schedule_end: the exponential schedule ends one epoch after the last, the others in it
+    span = epochs if sigma_schedule == "exponential" else max(epochs - 1, 1)
     for t in range(epochs):
-        sigma = SCHEDULES[sigma_schedule](sigma_initial, sigma_final, t, epochs)
+        sigma = SCHEDULES[sigma_schedule](sigma_initial, sigma_final, t, span)
         bmus = brute_force_distances(X, weights, metric).argmin(1)
         h = neighbourhood_matrix(n_rows, n_cols, sigma, neighbourhood, grid_metric)[bmus]  # (n_samples, n_nodes)
         denominator = h.sum(0)
-        weights = np.where(denominator[:, None] > 0, h.T @ X / denominator[:, None], weights)
+        with np.errstate(divide="ignore", invalid="ignore"):  # nodes with denominator 0 keep their weights
+            weights = np.where(denominator[:, None] > 0, h.T @ X / denominator[:, None], weights)
     return weights
 
 
@@ -201,6 +204,12 @@ def test_invalid_parameters(data):
         ({"sigma_schedule": [np.nan]}, "sigma_schedule"),
         ({"sigma_schedule": [[1.0]]}, "sigma_schedule"),
         ({"sigma_schedule": [1.0], "sigma_final": 0.5}, "must be None"),
+        ({"sigma_schedule": [1.0], "schedule_end": "last_epoch"}, "must be None"),
+        ({"schedule_end": "end"}, "schedule_end"),
+        ({"sigma_initial": [1, 2]}, "sigma_initial"),
+        ({"sigma_final": 1j}, "sigma_final"),
+        ({"sigma_schedule": ["wide"]}, "sigma_schedule"),
+        ({"sigma_schedule": (sigma for sigma in [1.0])}, "sigma_schedule"),
     ]:
         with pytest.raises(ValueError, match=match):
             SOM(**{"n_rows": 5, "n_cols": 4, **kwargs}, device=CPU).fit(data)
@@ -278,7 +287,7 @@ def test_neighbourhood_matrix(neighbourhood, grid_metric):
     for n_rows, n_cols in ((4, 7), (7, 4), (1, 6), (5, 1), (6, 6)):
         som = neighbourhood_som(n_rows, n_cols, neighbourhood=neighbourhood, grid_metric=grid_metric)
         values = rng.normal(size=(n_rows * n_cols, 3)).astype(np.float32)
-        for sigma in (0, 1e-20, 0.5, 1, np.sqrt(2), 1.5, np.sqrt(5), 3 - 1e-9, 3, 20):
+        for sigma in (0, 1e-20, 0.05, 0.5, 1, np.sqrt(2), 1.5, np.sqrt(5), 3 - 1e-9, 3, 20):
             expected = neighbourhood_matrix(n_rows, n_cols, sigma, neighbourhood, grid_metric) @ values
             np.testing.assert_allclose(smooth(som, values, sigma), expected, atol=1e-5, err_msg=f"sigma={sigma}")
 
@@ -308,26 +317,24 @@ def test_neighbourhood_values():
         row = smooth(som, np.eye(9, dtype=np.float32), sigma)[4].reshape(3, 3)
         expected = [[diagonal, edge, diagonal], [edge, 1, edge], [diagonal, edge, diagonal]]
         np.testing.assert_allclose(row, expected, atol=1e-7, err_msg=f"{neighbourhood}, {grid_metric}, {sigma}")
-        # sigma 0, and widths so small that the other nodes' weights underflow, leave the winner only
-        for sigma in (0, 1e-30, 0.05):
-            np.testing.assert_array_equal(smooth(som, np.eye(9, dtype=np.float32), sigma), np.eye(9))
 
 
 def test_sigma_schedules():
     for name, schedule in SCHEDULES.items():
         for sigma_initial, sigma_final in ((5.0, 0.5), (3.0, 1.0), (0.5, 4.0)):
-            for n_epochs in (0, 1, 10):
-                som = neighbourhood_som(
-                    10,
-                    10,
-                    n_epochs=n_epochs,
-                    sigma_initial=sigma_initial,
-                    sigma_final=sigma_final,
-                    sigma_schedule=name,
-                )
-                expected = [schedule(sigma_initial, sigma_final, t, n_epochs) for t in range(n_epochs)]
-                np.testing.assert_allclose(som._sigmas, expected, rtol=1e-12)
-                assert som._sigmas[:1] == (sigma_initial,)[:n_epochs]
+            for n_epochs in (0, 1, 2, 10):
+                kwargs = {"n_epochs": n_epochs, "sigma_initial": sigma_initial, "sigma_final": sigma_final}
+                for end, span in (("last_epoch", max(n_epochs - 1, 1)), ("after_last_epoch", n_epochs)):
+                    som = neighbourhood_som(10, 10, sigma_schedule=name, schedule_end=end, **kwargs)
+                    expected = [schedule(sigma_initial, sigma_final, t, span) for t in range(n_epochs)]
+                    np.testing.assert_allclose(som._sigmas, expected, rtol=1e-12)
+                    assert som._sigmas[:1] == (sigma_initial,)[:n_epochs]
+                    if end == "last_epoch" and n_epochs > 1:
+                        assert som._sigmas[-1] == pytest.approx(sigma_final, rel=1e-12)
+                # by default the exponential schedule ends after the last epoch (as until 0.6), the others in it
+                default = neighbourhood_som(10, 10, sigma_schedule=name, **kwargs)._sigmas
+                end = "after_last_epoch" if name == "exponential" else "last_epoch"
+                assert default == neighbourhood_som(10, 10, sigma_schedule=name, schedule_end=end, **kwargs)._sigmas
 
     # MiniSom's sigma decays: asymptotic_decay, inverse_decay_to_one and linear_decay_to_one
     sigma, n_epochs, t = 5.0, 10, np.arange(10)
@@ -336,17 +343,31 @@ def test_sigma_schedules():
         ({"sigma_schedule": "inverse", "sigma_final": 1}, sigma / (1 + t * (sigma - 1) / n_epochs)),
         ({"sigma_schedule": "linear", "sigma_final": 1}, sigma + t * (1 - sigma) / n_epochs),
     ]:
-        som = neighbourhood_som(10, 10, n_epochs=n_epochs, sigma_initial=sigma, **kwargs)
+        som = neighbourhood_som(
+            10, 10, n_epochs=n_epochs, sigma_initial=sigma, schedule_end="after_last_epoch", **kwargs
+        )
         np.testing.assert_allclose(som._sigmas, minisom, rtol=1e-12)
-    # FlowSOM's radius, r0 - r0 * k / (rlen * n) at the start of pass t, k = t * n
+    # FlowSOM's radius from r0 to 0 in the last epoch, or r0 - r0 * k / (rlen * n) at the start of pass t, k = t * n
     flowsom = {"sigma_initial": "flowsom", "sigma_final": 0, "sigma_schedule": "linear", "grid_metric": "chebyshev"}
     som = neighbourhood_som(10, 10, n_epochs=n_epochs, **flowsom)
+    np.testing.assert_allclose(som._sigmas, 6 - 6 * t / (n_epochs - 1), rtol=1e-12, atol=1e-15)
+    assert som._sigmas[-1] == 0
+    som = neighbourhood_som(10, 10, n_epochs=n_epochs, schedule_end="after_last_epoch", **flowsom)
     np.testing.assert_allclose(som._sigmas, 6 - 6 * t / n_epochs, rtol=1e-12)
 
     # or the widths themselves
     widths = [3, 2.5, 0.0]
     som = neighbourhood_som(10, 10, n_epochs=3, sigma_schedule=np.array(widths))
     assert som._sigmas == (3, 2.5, 0)
+
+
+def r_quantile(x, p):
+    """R's quantile(x, p) of type 7, its default, as written in R's stats::quantile."""
+    x = np.sort(np.ravel(x))
+    index = (len(x) - 1) * p
+    lo, hi = int(np.floor(index)), int(np.ceil(index))
+    h = index - lo
+    return x[lo] if h == 0 or x[hi] == x[lo] else (1 - h) * x[lo] + h * x[hi]
 
 
 def test_flowsom_initial_radius():
@@ -356,7 +377,7 @@ def test_flowsom_initial_radius():
     for n_rows, n_cols in ((10, 10), (7, 13), (1, 5), (1, 1), (12, 3)):
         for grid_metric in GRID_METRICS:
             som = neighbourhood_som(n_rows, n_cols, n_epochs=1, grid_metric=grid_metric, **flowsom)
-            assert som._sigmas[0] == pytest.approx(np.quantile(grid_distances(n_rows, n_cols, grid_metric), 0.67))
+            assert som._sigmas[0] == r_quantile(grid_distances(n_rows, n_cols, grid_metric), 0.67)
 
 
 def test_default_neighbourhood(data):
@@ -381,6 +402,16 @@ def test_neighbourhoods_match_reference(data, neighbourhood, grid_metric):
         # rtol for the mexican hat, whose small denominators extrapolate nodes far beyond the data
         np.testing.assert_allclose(som.fit(data).weights_, ref, rtol=1e-5, atol=1e-4)
 
+    # the whole schedule over several epochs; float32 vs float64 may flip near-tied BMUs, so compare map quality. Only
+    # for the gaussian: a compact neighbourhood leaves nodes with a handful of samples, whose flips change the map
+    if neighbourhood != "gaussian":
+        return
+    ref = reference_som(data, 6, 6, 2.5, 0.5, 3, **kwargs)
+    som = SOM(6, 6, n_epochs=3, sigma_initial=2.5, sigma_final=0.5, random_state=0, device=CPU, **kwargs).fit(data)
+    ref_dist = brute_force_distances(data, ref, "euclidean")
+    assert (som.labels_ == ref_dist.argmin(1)).mean() > 0.99
+    assert som.quantization_error(data) == pytest.approx(ref_dist.min(1).mean(), rel=1e-3)
+
 
 def lloyd(X, weights, n_iterations):
     """Batch k-means (Lloyd's algorithm) in float64; centroids without samples stay."""
@@ -401,15 +432,28 @@ def test_sigma_zero_is_batch_kmeans(data):
         som = SOM(3, 4, n_epochs=5, neighbourhood=neighbourhood, **kwargs).fit(data)
         np.testing.assert_allclose(som.weights_, lloyd(data, init, 5), atol=1e-4)
 
-    # FlowSOM's settings: the bubble's radius drops below one grid unit for the last epochs, which are k-means steps
+    # FlowSOM's settings: the bubble's radius reaches 0 in the last epoch, which updates every node from its own
+    # samples only, a batch k-means step, also on a large map whose previous epoch is still wide
     flowsom = {"neighbourhood": "bubble", "grid_metric": "chebyshev", "random_state": 0, "device": CPU}
-    som = SOM(3, 4, n_epochs=10, sigma_initial="flowsom", sigma_final=0, sigma_schedule="linear", **flowsom).fit(data)
-    widths = som._sigmas
-    assert widths[-2:] == pytest.approx([0.4, 0.2])
-    before = SOM(3, 4, n_epochs=9, sigma_schedule=widths[:-1], **flowsom).fit(data)
-    last = SOM(3, 4, n_epochs=1, sigma_schedule=widths[-1:], init=before.weights_, **flowsom).fit(data)
+    som = SOM(50, 50, n_epochs=10, sigma_initial="flowsom", sigma_final=0, sigma_schedule="linear", **flowsom)
+    widths = som.fit(data)._sigmas
+    assert widths[-2] > 1
+    assert widths[-1] == 0
+    before = SOM(50, 50, n_epochs=9, sigma_schedule=widths[:-1], **flowsom).fit(data)
+    last = SOM(50, 50, n_epochs=1, sigma_schedule=widths[-1:], init=before.weights_, **flowsom).fit(data)
     np.testing.assert_array_equal(last.weights_, som.weights_)
-    np.testing.assert_allclose(last.weights_, lloyd(data, before.weights_, 1), atol=1e-5)
+    labels = before.predict(data)  # the BMUs of the last epoch
+    occupied = np.unique(labels)
+    centroids = np.stack([data[labels == k].mean(0) for k in occupied])
+    np.testing.assert_allclose(som.weights_[occupied], centroids, atol=1e-5)
+    empty = np.setdiff1d(np.arange(2500), occupied)
+    np.testing.assert_array_equal(som.weights_[empty], before.weights_[empty])
+
+
+def test_widths_as_scalars():
+    # any real scalar, also a 0-d array or tensor, is a width
+    for sigma in (2, np.float32(2.5), np.array(2.5), torch.tensor(2.5)):
+        assert neighbourhood_som(4, 4, n_epochs=1, sigma_initial=sigma, sigma_final=sigma)._sigmas == (float(sigma),)
 
 
 def test_neighbourhood_options_pickle(data):
@@ -572,7 +616,7 @@ def test_pickle_round_trip(data, monkeypatch):
     state = som.__getstate__()
     for key in ("memory_fraction", "verbose", "deterministic", "fused", "precision"):  # pickled by 0.2
         del state[key]
-    for key in ("neighbourhood", "grid_metric", "sigma_schedule"):  # pickled by 0.6.0
+    for key in ("neighbourhood", "grid_metric", "sigma_schedule", "schedule_end"):  # pickled by 0.6.0
         del state[key]
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
@@ -613,12 +657,13 @@ def test_gpu_matches_cpu(data, metric, device, deterministic):
 
 @pytest.mark.parametrize("device", GPUS)
 def test_gpu_neighbourhoods_match_cpu(data, device):
-    for neighbourhood, grid_metric in (
-        ("bubble", "chebyshev"),
-        ("triangle", "euclidean"),
-        ("mexican_hat", "manhattan"),
+    for neighbourhood, grid_metric, n_rows, n_cols in (
+        ("bubble", "chebyshev", 5, 7),
+        ("triangle", "euclidean", 5, 7),
+        ("mexican_hat", "manhattan", 7, 5),
+        ("gaussian", "chebyshev", 1, 12),
     ):
-        kwargs = {"n_rows": 5, "n_cols": 7, "n_epochs": 1, "random_state": 0, "sigma_schedule": "linear"}
+        kwargs = {"n_rows": n_rows, "n_cols": n_cols, "n_epochs": 1, "random_state": 0, "sigma_schedule": "linear"}
         kwargs |= {"neighbourhood": neighbourhood, "grid_metric": grid_metric, "sigma_initial": "flowsom"}
         cpu = SOM(device=CPU, **kwargs).fit(data)
         gpu = SOM(device=device, deterministic=True, **kwargs).fit(data)

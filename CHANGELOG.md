@@ -11,16 +11,22 @@
     `"manhattan"`.
   - `sigma_schedule`: `"exponential"` (default), `"linear"`, `"inverse"` (MiniSom's asymptotic decay with
     `sigma_final=sigma_initial / 3`), or the widths of all epochs as a sequence.
+  - `schedule_end`: `"last_epoch"` makes the last epoch use `sigma_final`; `"after_last_epoch"` makes `sigma_final`
+    the width one epoch after the last, as the exponential schedule always has (and still does by default, so that
+    the default maps do not change). The linear and inverse schedules end in the last epoch by default: a linear
+    decay to 0 over 10 epochs would otherwise end at a tenth of the initial width, 2.9 units on 50 x 50 nodes with
+    FlowSOM's initial radius.
   - `sigma_final=0` is allowed under the linear schedule and any width of 0 leaves only the winner, which makes the
     epoch a batch k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the
     grid distances between all pairs of nodes. FlowSOM's settings are `neighbourhood="bubble",
-    grid_metric="chebyshev", sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0`.
+    grid_metric="chebyshev", sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0`, whose last epoch is a
+    k-means step.
   - The gaussian under euclidean and the bubble under chebyshev factor into the grid axes as before; the other
     combinations take one Toeplitz matrix product per grid offset at which the neighbourhood is not zero, up to
-    n_nodes^2 x n_features multiply-adds per epoch without holding the n_nodes x n_nodes matrix (on an M3 Max with 35
-    features at most 0.11 s per epoch at 300 x 300 nodes).
+    n_nodes^2 x n_features multiply-adds per epoch, holding max(n_rows, n_cols)^2 floats at a time (on an M3 Max with
+    35 features at most 0.11 s per epoch at 300 x 300 nodes).
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
-  1e-19 gave NaN and left the map unchanged.
+  4e-20 gave NaN and left the map unchanged.
 
 ## 0.6.0 (2026-10-26)
 

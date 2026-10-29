@@ -96,10 +96,10 @@ h(j, k) = \exp\left(-\frac{\lVert r_j - r_k \rVert^2}{2 \sigma(t)^2}\right),
 $$
 
 with grid coordinates $r$ and $\sigma(t) = \sigma_\text{initial} (\sigma_\text{final} / \sigma_\text{initial})^{t /
-n_\text{epochs}}$, where $t = 0, \ldots, n_\text{epochs} - 1$; a node whose denominator is 0 keeps its weights. There
-is no learning rate, because it cancels in the batch update {cite:p}`Kohonen_2001,Vesanto_2000`. These are the
-defaults; [](guide/neighbourhoods.md) describes the other neighbourhood functions, grid distances and width schedules.
-Only the rectangular topology is supported.
+n_\text{epochs}}$, where $t = 0, \ldots, n_\text{epochs} - 1$; a node whose denominator is not positive keeps its
+weights. There is no learning rate, because it cancels in the batch update {cite:p}`Kohonen_2001,Vesanto_2000`. These
+are the defaults; [](guide/neighbourhoods.md) describes the other neighbourhood functions, grid distances and width
+schedules. Only the rectangular topology is supported.
 
 ```{toctree}
 :hidden: true

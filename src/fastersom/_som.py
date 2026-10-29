@@ -14,8 +14,8 @@ Grouping samples by BMU gives the same update from per-node sums: with S_j the s
 BMU is j, numerator = H @ S and denominator = H @ n, H the (nodes x nodes) neighbourhood matrix. The gaussian on the
 euclidean grid distance is separable, H = H_rows (x) H_cols (as is the bubble on the chebyshev one), so both products
 take one matrix product along the rows and one along the columns, O(nodes * (n_rows + n_cols)) per epoch instead of
-O(n_samples * nodes), without ever building H. The other neighbourhoods depend only on the offsets between nodes and
-take one Toeplitz matrix product per offset along a grid axis, at most O(nodes^2) per epoch.
+O(n_samples * nodes), without ever building H. H depends only on the offsets between nodes, so the other
+combinations take one Toeplitz matrix product per offset along a grid axis, at most O(nodes^2) per epoch.
 
 References
 ----------
@@ -28,8 +28,9 @@ import sys
 import sysconfig
 import warnings
 from collections.abc import Callable
+from contextlib import suppress
 from functools import cache
-from math import ceil, isfinite
+from math import ceil, floor, isfinite
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal, cast, overload
@@ -44,9 +45,11 @@ _INITS = ("random", "sample")
 _NEIGHBOURHOODS = ("gaussian", "bubble", "triangle", "epanechnikov", "cut_gaussian", "mexican_hat")
 _GRID_METRICS = ("euclidean", "chebyshev", "manhattan")
 _SCHEDULES = ("exponential", "linear", "inverse")
+_SCHEDULE_ENDS = ("last_epoch", "after_last_epoch")
 # Below this neighbourhood width every neighbourhood is the identity in float32: the weight of the nearest other nodes,
-# such as the gaussian's exp(-0.5 / sigma^2), is below float32's smallest number (exp(-200)); the gaussian's
-# exp(-0.5 / sigma^2 * d^2) would otherwise give 0 * inf = NaN at d = 0 once 0.5 / sigma^2 overflows
+# such as the gaussian's exp(-0.5 / sigma^2) (exp(-200) at 0.05), rounds to 0, as float32 holds nothing below about
+# exp(-103). Without this the gaussian's exp(-0.5 / sigma^2 * d^2) gives 0 * inf = NaN at d = 0 once 0.5 / sigma^2
+# overflows float32 (below about 4e-20)
 _IDENTITY_SIGMA = 0.05
 # Up to this many features the float32 kernel beats cuBLAS's matrix product plus argmin for euclidean, cosine and
 # correlation (fit on an A100 from 100 to 10,000 nodes: 1.2-2.3x at 34 and 64 features, 1.1-1.2x at 128); beyond it
@@ -179,8 +182,15 @@ def _is_int(value, minimum: int) -> bool:
     return bool(isinstance(value, int | np.integer) and not isinstance(value, bool) and value >= minimum)
 
 
-def _is_real(value) -> bool:
-    return isinstance(value, int | float | np.integer | np.floating) and not isinstance(value, bool)
+def _width(name: str, value) -> float:
+    """A neighbourhood width given as any real scalar (also a 0-d array or tensor), as a float finite and >= 0."""
+    width = None
+    if not isinstance(value, bool | np.bool_ | str) and np.ndim(value) == 0:
+        with suppress(TypeError, ValueError):  # e.g. complex numbers
+            width = float(value)
+    if width is None or not isfinite(width) or width < 0:
+        raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
+    return width
 
 
 def _default_device() -> torch.device:
@@ -229,7 +239,10 @@ def _grid_distance(dr: np.ndarray, dc: np.ndarray, grid_metric: str) -> np.ndarr
 
 
 def _neighbourhood(d: np.ndarray, sigma: float, neighbourhood: str) -> np.ndarray:
-    """The neighbourhood function h(d; sigma) in float64, [d == 0] at sigma 0 (the limit of every function)."""
+    """The neighbourhood function h(d; sigma) in float64, [d == 0] at sigma 0 (the limit of every function).
+
+    fit never asks for widths below _IDENTITY_SIGMA, where H is the identity; sigma 0 is defined for completeness.
+    """
     if sigma == 0:
         return (d == 0).astype(np.float64)
     q = np.square(d / sigma)
@@ -299,16 +312,17 @@ class SOM:
         weights.
     sigma_initial
         Initial neighbourhood width in grid units: the standard deviation of the gaussian and the mexican hat, the
-        radius of the other neighbourhoods. Defaults to ceil(min(n_rows, n_cols) / 2) / 2. ``"flowsom"`` takes
-        FlowSOM's initial radius, the 0.67 quantile (R's type 7) of the grid distances between all pairs of nodes,
-        each with itself included, under grid_metric (FlowSOM's chebyshev: 6 for 10 x 10 nodes).
+        radius of the other neighbourhoods (and both for the cut gaussian). Defaults to
+        ceil(min(n_rows, n_cols) / 2) / 2. ``"flowsom"`` takes FlowSOM's initial radius, the 0.67 quantile (R's type
+        7) of the grid distances between all pairs of nodes, each with itself included, under grid_metric (FlowSOM's
+        chebyshev: 6 for 10 x 10 nodes).
     sigma_final
-        Width the schedule decays towards (reached at t = n_epochs, one epoch after the last), >= 0 under the linear
-        schedule and > 0 under the others. Defaults to min(0.1 * sigma_initial, 1): a tenth of the initial width, at
-        most one grid unit, so that a large map is not smoothed beyond the resolution of its units (on 100 x 100
-        nodes the quantization error is 9-13% lower than with 0.1 * sigma_initial = 2.5); maps up to 40 x 40 nodes
-        are unaffected. Smaller widths lower the quantization error further but raise the topographic error.
-        0.1 * sigma_initial reproduces XPySom's schedule.
+        Final width of the schedule, reached in the last epoch or one epoch after it (see schedule_end), >= 0 under the
+        linear schedule and > 0 under the others (an exponential or inverse decay cannot reach 0). Defaults to
+        min(0.1 * sigma_initial, 1): a tenth of the initial width, at most one grid unit, so that a large map is not
+        smoothed beyond the resolution of its units (on 100 x 100 nodes the quantization error is 9-13% lower than
+        with 0.1 * sigma_initial = 2.5); maps up to 40 x 40 nodes are unaffected. Smaller widths lower the
+        quantization error further but raise the topographic error. 0.1 * sigma_initial reproduces XPySom's schedule.
     init
         ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
         normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); an array of
@@ -364,7 +378,6 @@ class SOM:
         same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
         is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs may gain more,
         which is untested.
-
     neighbourhood
         Neighbourhood function h(d; sigma) of the grid distance d: ``"gaussian"`` exp(-d^2 / (2 sigma^2)),
         ``"bubble"`` 1 for d <= sigma (inclusive, as FlowSOM and the SOM Toolbox) else 0, ``"triangle"``
@@ -380,11 +393,19 @@ class SOM:
         take up to n_nodes^2 x n_features multiply-adds per epoch, small next to the BMU search when there are more
         samples than nodes. The topographic error and distance_map always use the 8 surrounding nodes. Keyword only.
     sigma_schedule
-        How the width moves from sigma_initial (s0) towards sigma_final (s1) over the epochs t = 0, ...,
-        n_epochs - 1, with s = t / n_epochs: ``"exponential"`` s0 (s1 / s0)^s, ``"linear"`` s0 + (s1 - s0) s (with
-        s1 = 0 FlowSOM's radius), or ``"inverse"`` s0 / (1 + (s0 / s1 - 1) s) (with s1 = s0 / 3 MiniSom's default
-        asymptotic decay). A sequence of n_epochs widths >= 0 gives the width of every epoch instead, with
-        sigma_initial and sigma_final None. Keyword only.
+        How the width moves from sigma_initial (s0) to sigma_final (s1) over the epochs t = 0, ..., n_epochs - 1,
+        with s from 0 to 1 as set by schedule_end: ``"exponential"`` s0 (s1 / s0)^s, ``"linear"`` s0 + (s1 - s0) s
+        (with s1 = 0 FlowSOM's radius, ending with a batch k-means step), or ``"inverse"`` s0 / (1 + (s0 / s1 - 1) s)
+        (MiniSom's asymptotic decay with s1 = s0 / 3 and schedule_end="after_last_epoch"). A sequence of n_epochs
+        widths >= 0 gives the width of every epoch instead, with sigma_initial, sigma_final and schedule_end None.
+        Keyword only.
+    schedule_end
+        ``"last_epoch"``: s = t / (n_epochs - 1), so that the last epoch uses sigma_final; ``"after_last_epoch"``:
+        s = t / n_epochs, so that sigma_final would be reached one epoch after the last, as in MiniSom and fastersom's
+        exponential default, and the last epoch is wider (with a linear decay to 0, sigma_initial / n_epochs). A single
+        epoch uses sigma_initial. Defaults to ``"after_last_epoch"`` under the exponential schedule, which keeps the
+        default maps of fastersom 0.6, and to ``"last_epoch"`` under the others. Keyword only.
+
 
     Attributes
     ----------
@@ -417,6 +438,7 @@ class SOM:
         neighbourhood: str = "gaussian",
         grid_metric: str = "euclidean",
         sigma_schedule: str | ArrayLike = "exponential",
+        schedule_end: str | None = None,
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -436,6 +458,7 @@ class SOM:
         self.neighbourhood = neighbourhood
         self.grid_metric = grid_metric
         self.sigma_schedule = sigma_schedule
+        self.schedule_end = schedule_end
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -466,6 +489,7 @@ class SOM:
         state.setdefault("neighbourhood", "gaussian")  # pickled by 0.6.0 and before
         state.setdefault("grid_metric", "euclidean")
         state.setdefault("sigma_schedule", "exponential")
+        state.setdefault("schedule_end", None)
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -735,14 +759,17 @@ class SOM:
     def _widths(self) -> tuple[float, ...]:
         """Validates the width parameters and returns the neighbourhood width of every epoch."""
         if not isinstance(self.sigma_schedule, str):  # the widths themselves
-            if self.sigma_initial is not None or self.sigma_final is not None:
-                raise ValueError("sigma_initial and sigma_final must be None when sigma_schedule gives the widths")
-            sigmas = np.asarray(self.sigma_schedule, dtype=np.float64)
-            if sigmas.shape != (self.n_epochs,) or not (np.isfinite(sigmas) & (sigmas >= 0)).all():
+            if self.sigma_initial is not None or self.sigma_final is not None or self.schedule_end is not None:
                 raise ValueError(
-                    f"sigma_schedule must be one of {_SCHEDULES} or n_epochs = {self.n_epochs} finite widths >= 0, "
-                    f"got {self.sigma_schedule!r}"
+                    "sigma_initial, sigma_final and schedule_end must be None when sigma_schedule gives the widths"
                 )
+            message = f"sigma_schedule must be one of {_SCHEDULES} or n_epochs = {self.n_epochs} finite widths >= 0"
+            try:
+                sigmas = np.asarray(self.sigma_schedule, dtype=np.float64)
+            except (TypeError, ValueError):
+                raise ValueError(f"{message}, got {self.sigma_schedule!r}") from None
+            if sigmas.shape != (self.n_epochs,) or not (np.isfinite(sigmas) & (sigmas >= 0)).all():
+                raise ValueError(f"{message}, got {self.sigma_schedule!r}")
             return tuple(sigmas.tolist())
         if self.sigma_schedule not in _SCHEDULES:
             raise ValueError(
@@ -755,30 +782,39 @@ class SOM:
         elif self.sigma_initial is None:
             sigma0 = ceil(min(self.n_rows, self.n_cols) / 2) / 2
         else:
-            sigma0 = self.sigma_initial
-        sigma1 = min(0.1 * sigma0, 1.0) if self.sigma_final is None else self.sigma_final
-        if not all(_is_real(sigma) and isfinite(sigma) and sigma >= 0 for sigma in (sigma0, sigma1)):
-            raise ValueError(f"sigma_initial and sigma_final must be finite and >= 0, got {sigma0!r} and {sigma1!r}")
+            sigma0 = _width("sigma_initial", self.sigma_initial)
+        sigma1 = min(0.1 * sigma0, 1.0) if self.sigma_final is None else _width("sigma_final", self.sigma_final)
         if self.sigma_schedule != "linear" and not (sigma0 > 0 and sigma1 > 0):
             raise ValueError(
                 f"sigma_schedule={self.sigma_schedule!r} needs sigma_initial and sigma_final > 0, got {sigma0!r} and "
                 f"{sigma1!r}; sigma_schedule='linear' allows 0"
             )
-        n_epochs = self.n_epochs
+        # s = t / span runs from 0 in the first epoch to 1 in the last ("last_epoch") or one epoch after it
+        # ("after_last_epoch"); a single epoch takes sigma_initial either way
+        n_epochs, end = self.n_epochs, self._schedule_end()
+        span = max(n_epochs - 1, 1) if end == "last_epoch" else n_epochs
         if self.sigma_schedule == "linear":
-            return tuple(sigma0 + (sigma1 - sigma0) * t / n_epochs for t in range(n_epochs))
+            return tuple(sigma0 + (sigma1 - sigma0) * t / span for t in range(n_epochs))
         if self.sigma_schedule == "inverse":
-            return tuple(sigma0 / (1 + (sigma0 / sigma1 - 1) * t / n_epochs) for t in range(n_epochs))
-        return tuple(sigma0 * (sigma1 / sigma0) ** (t / n_epochs) for t in range(n_epochs))
+            return tuple(sigma0 / (1 + (sigma0 / sigma1 - 1) * t / span) for t in range(n_epochs))
+        return tuple(sigma0 * (sigma1 / sigma0) ** (t / span) for t in range(n_epochs))
+
+    def _schedule_end(self) -> str:
+        """schedule_end, validated, with its default: "after_last_epoch" under exponential, else "last_epoch"."""
+        if self.schedule_end is None:
+            return "after_last_epoch" if self.sigma_schedule == "exponential" else "last_epoch"
+        if self.schedule_end not in _SCHEDULE_ENDS:
+            raise ValueError(f"schedule_end must be None or one of {_SCHEDULE_ENDS}, got {self.schedule_end!r}")
+        return self.schedule_end
 
     def _smoother(self, sigma: float) -> Callable[[torch.Tensor], torch.Tensor]:
         """Build the product H @ values with the neighbourhood matrix of width sigma, H[j, k] = h(d(r_j, r_k); sigma).
 
-        Below a width of 0.05 grid units, H is the identity in float32 for every neighbourhood (the gaussian's
-        exp(-0.5 / sigma^2) underflows), and values are returned as they are. The gaussian under the euclidean grid
-        metric and the bubble under chebyshev factor into the grid axes, H = H_rows (x) H_cols, and take one small
-        matrix product along each. Every other neighbourhood takes _convolve. Whatever goes to the device is made
-        here, before fit queues the epoch's BMU search, so that copying it does not wait for the search.
+        Where H is the identity in float32, values are returned as they are: below a width of 0.05 grid units for
+        every neighbourhood, and wherever only the winner has a weight that is not 0, such as for the bubble below
+        a radius of 1. The gaussian under the euclidean grid metric and the bubble under chebyshev factor into the
+        grid axes, H = H_rows (x) H_cols, and take one small matrix product along each, with the factors made on the
+        device. Every other neighbourhood takes _convolve.
         """
         if sigma < _IDENTITY_SIGMA:
             return lambda values: values
@@ -789,18 +825,20 @@ class SOM:
                 return (r[:, None] - r).square_().mul_(-0.5 / sigma**2).exp_()
 
         elif (self.neighbourhood, self.grid_metric) == ("bubble", "chebyshev"):
+            radius = floor(sigma)  # the integer distances d <= sigma exactly when d <= floor(sigma)
+            if radius == 0:
+                return lambda values: values
 
-            def factor(n: int) -> torch.Tensor:  # compared in float64, as _neighbourhood does
-                r = np.arange(n)
-                return torch.as_tensor(np.abs(r[:, None] - r) <= sigma, dtype=torch.float32, device=self._device)
+            def factor(n: int) -> torch.Tensor:
+                r = torch.arange(n, device=self._device)
+                return (r[:, None] - r).abs_().le(radius).float()
 
         else:
             return self._convolve(sigma)
-        rows, cols = factor(self.n_rows), factor(self.n_cols)
 
         def smooth(values: torch.Tensor) -> torch.Tensor:
-            grid = (rows @ values.view(self.n_rows, -1)).view(self.n_rows, self.n_cols, -1)
-            return (cols @ grid).view(len(values), -1)
+            grid = (factor(self.n_rows) @ values.view(self.n_rows, -1)).view(self.n_rows, self.n_cols, -1)
+            return (factor(self.n_cols) @ grid).view(len(values), -1)
 
         return smooth
 
@@ -811,20 +849,22 @@ class SOM:
         the grid as a (rows, cols, n) array V, (H V)[:, c] = sum over offsets e of T_e V[:, c - e], T_e the
         n_rows x n_rows Toeplitz matrix of K[:, e]: one matrix product per column offset (per row offset if there
         are fewer rows, on the transposed grid), skipping the offsets whose weights are all 0, such as those beyond a
-        bubble's radius. H itself is never held. K is evaluated in float64 on the CPU, so that the cut-offs compare
-        exactly and every device gets the same weights. This takes up to n_nodes^2 x n_features multiply-adds per
-        epoch, fewer with a compact neighbourhood, compared to the BMU search's n_samples x n_nodes x n_features.
+        bubble's radius. This holds one T_e at a time, max(n_rows, n_cols)^2 floats (all of H on a 1 x n map), and
+        takes up to n_nodes^2 x n_features multiply-adds per epoch, fewer with a compact neighbourhood, compared to
+        the BMU search's n_samples x n_nodes x n_features. K is evaluated in float64 on the CPU, so that the cut-offs
+        compare exactly and every device gets the same weights, and copied to the device here, which waits for the
+        work queued on it: fit builds the products of all epochs before the first.
         """
         n_rows, n_cols = self.n_rows, self.n_cols
         dr, dc = np.arange(1 - n_rows, n_rows), np.arange(1 - n_cols, n_cols)
         table = _neighbourhood(_grid_distance(dr[:, None], dc[None], self.grid_metric), sigma, self.neighbourhood)
         transpose = n_cols > n_rows  # loop over the offsets of the shorter axis, with fewer, larger products
-        kernel = torch.as_tensor(table.T if transpose else table, dtype=torch.float32)
-        n_long, n_short = kernel.shape[0] // 2 + 1, kernel.shape[1] // 2 + 1
-        offsets = [e for e in range(1 - n_short, n_short) if kernel[:, e + n_short - 1].any()]
-        kernel = kernel.to(self._device)
-        r = torch.arange(n_long, device=self._device)
-        toeplitz = r[:, None] - r + n_long - 1  # T_e = kernel[toeplitz, e + n_short - 1]
+        table = (table.T if transpose else table).astype(np.float32)
+        if np.count_nonzero(table) == 1:  # the winner only
+            return lambda values: values
+        n_long, n_short = table.shape[0] // 2 + 1, table.shape[1] // 2 + 1
+        offsets = np.flatnonzero(table.any(0)) - (n_short - 1)
+        kernel = torch.as_tensor(table, device=self._device)
 
         def smooth(values: torch.Tensor) -> torch.Tensor:
             width = values.shape[1]
@@ -833,10 +873,12 @@ class SOM:
             else:
                 grid = values.view(n_rows, n_cols * width)
             out = torch.zeros_like(grid)
-            for e in offsets:
+            for e in offsets.tolist():
                 lo, hi = max(0, e), n_short + min(0, e)  # output positions c along the shorter axis, reading c - e
                 source = grid[:, (lo - e) * width : (hi - e) * width]
-                out[:, lo * width : hi * width].addmm_(kernel[toeplitz, e + n_short - 1], source)
+                # T_e[a, b] = K[a - b, e] from the windows K[a + k, e] of the column, k = n_long - 1 - b
+                toeplitz = kernel[:, e + n_short - 1].unfold(0, n_long, 1).flip(1)
+                out[:, lo * width : hi * width].addmm_(toeplitz, source)
             if transpose:
                 return out.view(n_cols, n_rows, width).transpose(0, 1).reshape(len(values), width)
             return out.view(len(values), width)
@@ -874,7 +916,8 @@ class SOM:
             magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
         if half and metal is not None:
             assert magnitude is not None
-            # the nodes stay among the samples and the initial weights, so these bound all that the half kernels scale
+            # the nodes stay among the samples and the initial weights (except under the mexican hat, whose negative
+            # weights can move them beyond), so these bound all that the half kernels scale
             half = metal.in_half_range(torch.maximum(magnitude, weights.abs().amax(0)))
         kernel = self._kernel(data.shape[1], half=half)
         mps = self._device.type == "mps"
@@ -899,8 +942,12 @@ class SOM:
             else:
                 scale = data.new_ones(data.shape[1], dtype=torch.float64).ldexp_(low_shift - exponent)
                 fixed_rows = max(1, (1 << 21) // data.shape[1])
+        # copying a neighbourhood's weights to the device waits for the GPU, so the updates of all epochs are built
+        # before the first is queued, unless their weights take more than 2^24 floats
+        tables = self.n_epochs * (2 * self.n_rows - 1) * (2 * self.n_cols - 1)
+        smoothers = [self._smoother(sigma) for sigma in self._sigmas] if tables <= 1 << 24 else None
         for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
-            smooth = self._smoother(self._sigmas[t])
+            smooth = self._smoother(self._sigmas[t]) if smoothers is None else smoothers[t]
             sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
             # (empty without fixed point)
             lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)
