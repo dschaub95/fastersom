@@ -106,8 +106,16 @@ FlowSOM (R) {cite:p}`Van_Gassen_2015`
   the grid distances to 0 over `rlen` passes through the data:
 
   ```python
-  SOM(10, 10, n_epochs=10, neighbourhood="bubble", grid_metric="chebyshev", sigma_schedule="linear",
-      sigma_initial="flowsom", sigma_final=0)
+  SOM(
+      10,
+      10,
+      n_epochs=10,
+      neighbourhood="bubble",
+      grid_metric="chebyshev",
+      sigma_schedule="linear",
+      sigma_initial="flowsom",
+      sigma_final=0,
+  )
   ```
 
   The radius falls from 6 (for 10 x 10 nodes) in the first epoch to 0 in the last, which is a batch k-means step,
