@@ -639,22 +639,30 @@ class SOM:
         weights = self._centre(weights)
         return weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12), None, None
 
-    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Per-node score to minimise: the L1 distance (manhattan), else as in _operands."""
+    def _scorer(self, weights: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
+        """Per-node scores of a batch to minimise: the L1 distance (manhattan), else as in _operands.
+
+        The operands are computed once for all batches: per batch, their n_nodes x n_features copies cost more than
+        small batches' matrix products (on the CPU, 100 x 100 nodes x 1000 features fit 2.3x as fast at 512 samples).
+        """
         if self.metric == "manhattan":
-            return _cdist(batch, weights, 1)
+            return lambda batch: _cdist(batch, weights, 1)
         nodes, bias, centre = self._operands(weights)
         if bias is None:
-            return self._centre(batch) @ nodes.T
+            return lambda batch: self._centre(batch) @ nodes.T
         assert centre is not None  # euclidean has both
-        if batch.device.type == "mps":
+        if weights.device.type == "mps":
             # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
             # further pass over the scores, which is slower at the small batches of large maps; a column of ones in
             # the batch and the node norms in the weights make the bias part of a single matmul. On CUDA addmm fuses
             # the bias into the matmul (cuBLASLt epilogue), so it stays there
-            ones = batch.new_ones(len(batch), 1)
-            return torch.cat([batch - centre, ones], 1) @ torch.cat([nodes, bias[:, None]], 1).T
-        return torch.addmm(bias, batch - centre, nodes.T)
+            extended = torch.cat([nodes, bias[:, None]], 1).T
+            return lambda batch: torch.cat([batch - centre, batch.new_ones(len(batch), 1)], 1) @ extended
+        return lambda batch: torch.addmm(bias, batch - centre, nodes.T)
+
+    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """Per-node score to minimise of one batch (see _scorer)."""
+        return self._scorer(weights)(batch)
 
     def _search(
         self, weights: torch.Tensor, kernel: str | None, top2: bool = False, magnitude: torch.Tensor | None = None
@@ -666,9 +674,10 @@ class SOM:
         "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales.
         """
         if kernel is None:
+            scores = self._scorer(weights)
             if top2:
-                return lambda batch: self._scores(batch, weights).topk(2, 1, largest=False).indices
-            return lambda batch: self._scores(batch, weights).argmin(1)
+                return lambda batch: scores(batch).topk(2, 1, largest=False).indices
+            return lambda batch: scores(batch).argmin(1)
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
         if kernel == "metal-float16":
