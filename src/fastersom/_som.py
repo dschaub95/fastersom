@@ -33,7 +33,7 @@ from functools import cache
 from math import ceil, floor, isfinite
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 
 import numpy as np
 import torch
@@ -69,7 +69,8 @@ _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
 # samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu), and their largest number of values: each
-# part is copied by the metric's transform and by the selection of the samples with a BMU, 64 MB per copy at most
+# part is copied by the metric's transform (KMeans') and by the selection of the samples with a BMU, 64 MB per copy
+# at most unless a batch is larger
 _CPU_SUM_ROWS = 1 << 20
 _CPU_SUM_VALUES = 1 << 24
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
@@ -292,6 +293,18 @@ def _synchronize(device: torch.device) -> None:
         torch.mps.synchronize()
 
 
+class _Summing(NamedTuple):
+    """How SOM._sums adds the samples of a fit (see SOM._summing)."""
+
+    deterministic: bool
+    fixed_point: bool = False
+    low_shift: int = 0  # the remainders' scale, 2^low_shift
+    shift: torch.Tensor | None = None  # MPS: per-feature shifts to fixed point
+    factors: tuple[torch.Tensor, torch.Tensor] | None = None  # MPS: 2^exponent as two float32 factors
+    scale: torch.Tensor | None = None  # CUDA: per-feature scales to fixed point (float64)
+    fixed_rows: int = 0  # CUDA: rows per part of the float64 and int64 copies
+
+
 class SOM:
     """Batch self-organising map on a rectangular grid, by default with a gaussian neighbourhood.
 
@@ -334,14 +347,14 @@ class SOM:
         ``"random"`` draws weights uniformly from [-1, 1]^d with numpy's ``RandomState(random_state)`` and
         normalises them to unit length; ``"sample"`` uses randomly chosen samples (ones with a BMU); ``"pca"``
         places the nodes on a regular grid in the plane of the samples' first two principal components (linear
-        initialisation, as the SOM Toolbox's som_lininit): centred at the mean, the longer side of the map along the
-        first component, each side spanning one standard deviation of its component to either side (a side of one
-        node stays at the mean); under cosine and correlation, the components of the samples scaled to unit length
-        (and centred) as the metric compares them, of the samples with a BMU; an array of
-        shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives the initial weights, e.g. another
-        map's ``weights_`` for a warm start. The sigma schedule restarts at sigma_initial, which with the default
-        largely retrains the map; to continue training, pass a small sigma_initial such as the previous
-        sigma_final.
+        initialisation, as the SOM Toolbox's som_lininit, which puts the first component along the rows instead):
+        centred at the mean, the longer side of the map along the first component, each side spanning one standard
+        deviation of its component to either side (a side of one node stays at the mean); under cosine and
+        correlation, the components of the samples scaled to unit length (and centred) as the metric compares them, of
+        the samples with a BMU; an array of shape (n_rows * n_cols, n_features) or (n_rows, n_cols, n_features) gives
+        the initial weights, e.g. another map's ``weights_`` for a warm start. The sigma schedule restarts at
+        sigma_initial, which with the default largely retrains the map; to continue training, pass a small
+        sigma_initial such as the previous sigma_final.
     metric
         ``"euclidean"``, ``"manhattan"`` (L1), ``"cosine"`` (1 - cosine similarity) or ``"correlation"``
         (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
@@ -358,9 +371,10 @@ class SOM:
         (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
         epoch's update is the same up to float summation order, but over several epochs such rounding differences
         (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-        on the CPU to 2^24 / n_nodes, from 8192 to 65536, and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused
-        kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch
-        recommends; 65536 before torch 2.5).
+        on the CPU to 2^22 / max(n_nodes, n_features), from 512 to 65536 (on macOS 2^24 / max(n_nodes,
+        n_features), from 8192 to 65536), and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features
+        with the fused kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the
+        memory torch recommends; 65536 before torch 2.5).
     memory_fraction
         Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
         on CUDA and 0.5 on MPS, whose memory the system and other apps share.
@@ -588,9 +602,17 @@ class SOM:
         elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
             free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
         elif self._device.type == "cpu":
-            # larger for fewer nodes, whose score matrix is small: a few operations per batch dominate below about
-            # 2^24 scores (16 MB), and above the matrix product dominates
-            return min(1 << 16, max(8192, (1 << 24) // (self.n_rows * self.n_cols)))
+            largest = max(self.n_rows * self.n_cols, data.shape[1])
+            if sys.platform == "darwin":
+                # a few operations per batch dominate below about 2^24 scores (64 MB), the matrix product above (on an
+                # M3 Max at 34 features, an epoch half as long at 10 x 10 nodes as at 8192 rows); many features cap the
+                # rows as many nodes do, so that a batch's copies stay within that too
+                return min(1 << 16, max(8192, (1 << 24) // largest))
+            # a batch's scores, and its copies, in about 16 MB each: glibc maps blocks above 32 MB afresh on every
+            # allocation, whose page faults make an epoch take up to 2-4x as long (on an AMD EPYC 7742 with 8 threads,
+            # from 5 x 5 to 100 x 100 nodes and 8 to 4000 features); below 512 rows, rereading the weights for each
+            # batch costs more than the cache saves at many nodes and features (200 x 200 x 64)
+            return min(1 << 16, max(512, (1 << 22) // largest))
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
@@ -639,14 +661,14 @@ class SOM:
             if weights.shape[1] != data.shape[1]:
                 raise ValueError(f"X has {data.shape[1]} features, but init has {weights.shape[1]}")
             return weights
+        if self.init == "pca":
+            return self._pca_weights(data)
         rng = np.random.RandomState(self.random_state)
         n_nodes = self.n_rows * self.n_cols
         if self.init == "random":
             values = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
             values /= np.linalg.norm(values, axis=-1, keepdims=True)
             return torch.as_tensor(values.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
-        if self.init == "pca":
-            return self._pca_weights(data)
         has_bmu = self._has_bmu(data)
         candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
         if len(candidates) == 0:
@@ -664,33 +686,20 @@ class SOM:
     def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
         """Linear initialisation: the grid in the plane of the first two principal components (see init).
 
-        The covariance is summed about the mean of _mean in batches, each batch's product in float32 on the device and
-        the sum in float64 on the CPU, so that large inputs lose no precision, less the part due to the mean's rounding
-        to float32; its eigenvectors' signs are fixed so that their largest entry is positive.
+        The covariance is that of _scatter; its eigenvectors' signs are fixed so that their largest entry is positive.
         """
         n_features, batch_size = data.shape[1], max(1, (1 << 24) // data.shape[1])
         mean, n_samples = self._mean(data, batch_size)
         if n_samples < 2:
             raise ValueError("init='pca' needs at least two samples with a BMU")
-        centre = mean.float().to(self._device)
-        covariance = torch.zeros(n_features, n_features, dtype=torch.float64, device="cpu")
-        offset = torch.zeros(n_features, dtype=torch.float64, device="cpu")
-        for values in self._compared_batches(data, batch_size):
-            centred = values - centre
-            covariance += (centred.T @ centred).cpu().double()
-            offset += centred.sum(0).cpu().double()
-        covariance -= offset[:, None] * offset / n_samples
+        covariance = self._scatter(data, batch_size, mean, n_samples)
         values, vectors = torch.linalg.eigh(covariance / (n_samples - 1))
         values, vectors = values.flip(0).clamp_min(0), vectors.flip(1)
         vectors = vectors * vectors.gather(0, vectors.abs().argmax(0, keepdim=True)).sign()
-        axes = [
-            vectors[:, k] * values[k].sqrt()
-            if k < n_features
-            else torch.zeros(n_features, dtype=torch.float64, device="cpu")
-            for k in range(2)
-        ]
+        first = vectors[:, 0] * values[0].sqrt()
+        second = vectors[:, 1] * values[1].sqrt() if n_features > 1 else torch.zeros_like(first)
         long_rows = self.n_rows >= self.n_cols  # the longer side along the first component
-        row_axis, col_axis = (axes[0], axes[1]) if long_rows else (axes[1], axes[0])
+        row_axis, col_axis = (first, second) if long_rows else (second, first)
 
         def positions(n: int) -> torch.Tensor:
             if n == 1:
@@ -703,28 +712,47 @@ class SOM:
         return grid.reshape(self.n_rows * self.n_cols, n_features).float().to(self._device)
 
     def _compared_batches(self, data: torch.Tensor, batch_size: int) -> Iterator[torch.Tensor]:
-        """The samples with a BMU as the metric compares them (see _compared), batch by batch."""
+        """The samples with a BMU as the metric compares them (see _compared), batch by batch, without empty batches."""
         for batch in data.split(batch_size):
             keep = self._has_bmu(batch)
-            yield self._compared(batch if keep is None else batch[keep])
+            batch = self._compared(batch if keep is None else batch[keep])
+            if len(batch):
+                yield batch
 
     def _mean(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, int]:
         """Mean (float64, on the CPU) and number of the samples with a BMU as the metric compares them.
 
         Each batch is summed in float32 on the device less the first such sample, so that an offset common to the
         samples is not rounded however large (equal samples have their exact mean), and the batches' sums in float64
-        on the CPU. The mean is 0 without samples.
+        on the CPU. A first sample far from the others rounds the mean to about float32's precision at their distance
+        (see issue #29). The mean is 0 without samples.
         """
         total = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
         first, n_samples = None, 0
         for values in self._compared_batches(data, batch_size):
-            if len(values):
-                first = values[0].clone() if first is None else first
-                total += (values - first).sum(0).cpu().double()
-                n_samples += len(values)
+            first = values[0].clone() if first is None else first
+            total += (values - first).sum(0).cpu().double()
+            n_samples += len(values)
         if first is None:
             return total, 0
         return first.cpu().double() + total / n_samples, n_samples
+
+    def _scatter(self, data: torch.Tensor, batch_size: int, mean: torch.Tensor, n_samples: int) -> torch.Tensor:
+        """Sum of squares about the mean of _mean of the samples with a BMU as the metric compares them.
+
+        The matrix sum_i (x_i - m)(x_i - m)^T (float64, on the CPU), with mean and n_samples from _mean. It is summed
+        about the mean rounded to float32, batch by batch, each batch's in float32 on the device and the sum in float64
+        on the CPU, so that large inputs lose no precision, less the part due to the rounding of the mean. The float32
+        products overflow for values of about 1e18 (see issue #30), beyond those a float32 fit handles anyway.
+        """
+        centre = mean.float().to(self._device)
+        total = torch.zeros((data.shape[1],) * 2, dtype=torch.float64, device="cpu")
+        offset = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
+        for values in self._compared_batches(data, batch_size):
+            centred = values - centre
+            total += (centred.T @ centred).cpu().double()
+            offset += centred.sum(0).cpu().double()
+        return total - offset[:, None] * offset / n_samples
 
     def _has_bmu(self, data: torch.Tensor) -> torch.Tensor | None:
         """Mask of samples with a BMU: non-zero ones (cosine), non-constant ones (correlation); None if all."""
@@ -755,22 +783,30 @@ class SOM:
         weights = self._centre(weights)
         return weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12), None, None
 
-    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        """Per-node score to minimise: the L1 distance (manhattan), else as in _operands."""
+    def _scorer(self, weights: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
+        """Per-node scores of a batch to minimise: the L1 distance (manhattan), else as in _operands.
+
+        The operands are computed once for all batches: per batch, their n_nodes x n_features copies cost more than
+        small batches' matrix products (on the CPU, 100 x 100 nodes x 1000 features fit 2.3x as fast at 512 samples).
+        """
         if self.metric == "manhattan":
-            return _cdist(batch, weights, 1)
+            return lambda batch: _cdist(batch, weights, 1)
         nodes, bias, centre = self._operands(weights)
         if bias is None:
-            return self._centre(batch) @ nodes.T
+            return lambda batch: self._centre(batch) @ nodes.T
         assert centre is not None  # euclidean has both
-        if batch.device.type == "mps":
+        if weights.device.type == "mps":
             # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
             # further pass over the scores, which is slower at the small batches of large maps; a column of ones in
             # the batch and the node norms in the weights make the bias part of a single matmul. On CUDA addmm fuses
             # the bias into the matmul (cuBLASLt epilogue), so it stays there
-            ones = batch.new_ones(len(batch), 1)
-            return torch.cat([batch - centre, ones], 1) @ torch.cat([nodes, bias[:, None]], 1).T
-        return torch.addmm(bias, batch - centre, nodes.T)
+            extended = torch.cat([nodes, bias[:, None]], 1).T
+            return lambda batch: torch.cat([batch - centre, batch.new_ones(len(batch), 1)], 1) @ extended
+        return lambda batch: torch.addmm(bias, batch - centre, nodes.T)
+
+    def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        """Per-node score to minimise of one batch (see _scorer)."""
+        return self._scorer(weights)(batch)
 
     def _search(
         self, weights: torch.Tensor, kernel: str | None, top2: bool = False, magnitude: torch.Tensor | None = None
@@ -782,9 +818,10 @@ class SOM:
         "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales.
         """
         if kernel is None:
+            scores = self._scorer(weights)
             if top2:
-                return lambda batch: self._scores(batch, weights).topk(2, 1, largest=False).indices
-            return lambda batch: self._scores(batch, weights).argmin(1)
+                return lambda batch: scores(batch).topk(2, 1, largest=False).indices
+            return lambda batch: scores(batch).argmin(1)
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
         if kernel == "metal-float16":
@@ -976,7 +1013,7 @@ class SOM:
 
     def _summing(
         self, n_samples: int, kernel: str | None, deterministic: bool, magnitude: torch.Tensor | None
-    ) -> dict[str, Any]:
+    ) -> _Summing:
         """How _sums adds the samples of a fit: in float, or deterministically.
 
         Deterministic sums add int64 fixed point, which unlike index_add_'s atomic float additions gives the same
@@ -989,24 +1026,19 @@ class SOM:
         values to sum, needed when deterministic.
         """
         mps = self._device.type == "mps"
-        summing: dict[str, Any] = {"mps": mps, "deterministic": deterministic}
-        summing["fixed_point"] = fixed_point = deterministic and (not mps or kernel in _METAL)
-        if fixed_point:
-            assert magnitude is not None
-            low_shift = 62 - n_samples.bit_length()  # remainders within +-0.5, so their sums below 2^61
-            summing["low_shift"] = low_shift
-            # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
-            _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
-            if mps:  # the shifts, and 2^exponent as two float32 factors, which MPS's lack of float64 calls for
-                summing["shift"] = (low_shift - exponent).int().to(self._device)
-                split = exponent // 2
-                summing["factors"] = [
-                    torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split)
-                ]
-            else:
-                summing["scale"] = magnitude.new_ones(len(magnitude), dtype=torch.float64).ldexp_(low_shift - exponent)
-                summing["fixed_rows"] = max(1, (1 << 21) // len(magnitude))
-        return summing
+        if not deterministic or (mps and kernel not in _METAL):
+            return _Summing(deterministic)
+        assert magnitude is not None
+        low_shift = 62 - n_samples.bit_length()  # remainders within +-0.5, so their sums below 2^61
+        # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
+        _, exponent = torch.frexp(magnitude.cpu() if mps else magnitude)
+        if mps:  # the shifts, and 2^exponent as two float32 factors, which MPS's lack of float64 calls for
+            split = exponent // 2
+            first, second = (torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split))
+            shift = (low_shift - exponent).int().to(self._device)
+            return _Summing(True, True, low_shift, shift=shift, factors=(first, second))
+        scale = magnitude.new_ones(len(magnitude), dtype=torch.float64).ldexp_(low_shift - exponent)
+        return _Summing(True, True, low_shift, scale=scale, fixed_rows=max(1, (1 << 21) // len(magnitude)))
 
     def _sums(
         self,
@@ -1014,7 +1046,7 @@ class SOM:
         search: Callable[[torch.Tensor], torch.Tensor],
         n_nodes: int,
         batch_size: int,
-        summing: dict[str, Any],
+        summing: _Summing,
         transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Sum the samples per node.
@@ -1022,9 +1054,9 @@ class SOM:
         Per-node sums (float32) and counts of the samples assigned by search, the samples transformed by transform
         before they are added; samples without a BMU add nothing.
         """
-        if data.device.type == "cpu" and not summing["deterministic"]:
+        if data.device.type == "cpu":  # always deterministic, so fit never asks for deterministic sums there
             return self._sums_cpu(data, search, n_nodes, batch_size, transform)
-        fixed_point, mps = summing["fixed_point"], summing["mps"]
+        fixed_point, mps, low_shift = summing.fixed_point, data.device.type == "mps", summing.low_shift
         sums = data.new_zeros((n_nodes, data.shape[1]), dtype=torch.long if fixed_point else torch.float32)
         lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
         # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
@@ -1037,19 +1069,15 @@ class SOM:
             if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count them)
                 batch = batch * keep[:, None]
             if fixed_point and mps:
-                _module(self._device, "metal").fixed_sums(
-                    batch, bmus, summing["shift"], summing["low_shift"], sums, lows
-                )
+                _module(self._device, "metal").fixed_sums(batch, bmus, summing.shift, low_shift, sums, lows)
             elif fixed_point:  # in parts of 2^21 values, as the float64 and int64 copies take 6x the memory
-                for rows, part in zip(
-                    bmus.split(summing["fixed_rows"]), batch.split(summing["fixed_rows"]), strict=True
-                ):
-                    value = part.double().mul_(summing["scale"])
+                for rows, part in zip(bmus.split(summing.fixed_rows), batch.split(summing.fixed_rows), strict=True):
+                    value = part.double().mul_(summing.scale)
                     high = value.round()
                     sums.index_add_(0, rows, high.long())
-                    lows.index_add_(0, rows, value.sub_(high).mul_(2.0 ** summing["low_shift"]).round_().long())
+                    lows.index_add_(0, rows, value.sub_(high).mul_(2.0**low_shift).round_().long())
                     del value, high  # before the next part's copies
-            elif summing["deterministic"]:  # on MPS without the Metal kernels a matrix product, in a fixed order
+            elif summing.deterministic:  # on MPS without the Metal kernels a matrix product, in a fixed order
                 sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
             else:
                 sums.index_add_(0, bmus, batch)
@@ -1057,11 +1085,13 @@ class SOM:
                 0, bmus, torch.ones_like(bmus, dtype=counts.dtype) if keep is None else keep.to(counts.dtype)
             )
         if fixed_point and mps:
-            low_shift, (first, second) = summing["low_shift"], summing["factors"]
+            assert summing.factors is not None
+            first, second = summing.factors
             sums = (sums.float() + lows.float() * 2.0**-low_shift) * 2.0**-low_shift * first * second
         elif fixed_point:
-            scale = summing["scale"]
-            sums = (sums / scale + lows / (scale * 2.0 ** summing["low_shift"])).float()
+            scale = summing.scale
+            assert scale is not None
+            sums = (sums / scale + lows / (scale * 2.0**low_shift)).float()
         return sums, counts
 
     def _sums_cpu(

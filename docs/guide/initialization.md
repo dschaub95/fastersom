@@ -14,10 +14,11 @@ can end in a different map.
   many identical background pixels of an image, are drawn as often as they occur.
 
 `"pca"`
-: Linear initialisation {cite:p}`Kohonen_2013`, defined as in the SOM Toolbox {cite:p}`Vesanto_2000`. The nodes lie on
-  a regular grid in the plane of the samples' first two principal components: centred at the mean, with the longer
-  side of the map along the first component, and each side spanning one standard deviation of its component to either
-  side. Unit $(r, c)$ of an $R \times C$ map (with $R \ge C$) starts at
+: Linear initialisation {cite:p}`Kohonen_2013`, defined as in the SOM Toolbox {cite:p}`Vesanto_2000`, except that the
+  Toolbox puts the first component along the rows. The nodes lie on a regular grid in the plane of the samples' first
+  two principal components: centred at the mean, with the longer side of the map along the first component, and each
+  side spanning one standard deviation of its component to either side. Node $(r, c)$ of an $R \times C$ map (with
+  $R \ge C$) starts at
 
   $$
   w_{rc} = \mu + s_r \sqrt{\lambda_1}\, v_1 + t_c \sqrt{\lambda_2}\, v_2,
@@ -36,7 +37,7 @@ An array
 ```python
 from fastersom import SOM
 
-som = SOM(30, 30, init="pca", random_state=0).fit(X)
+som = SOM(30, 30, init="pca").fit(X)
 ```
 
 The covariance is computed in two passes over the samples, each batch on the device and the sum in double precision

@@ -302,7 +302,7 @@ class KMeans:
     def _feature_variance(engine: SOM, data: torch.Tensor, batch_size: int) -> float:
         """The mean over the features of the variance of the values summed (of the samples with a centroid).
 
-        In two passes as for the covariance of :meth:`SOM._pca_weights`: about the mean of :meth:`SOM._mean`, less the
+        In two passes as :meth:`SOM._scatter`: about the mean of :meth:`SOM._mean`, less the
         part due to its rounding to float32.
         """
         mean, n_samples = engine._mean(data, batch_size)
