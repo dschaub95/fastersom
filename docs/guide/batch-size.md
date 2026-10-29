@@ -19,8 +19,9 @@ On top of it come the data itself, `n_samples x n_features` float32 values on th
 
 With `batch_size=None` (the default):
 
-- On the CPU, it is `2**22 / n_nodes` samples, from 512 to 65536, so that a batch's score matrix stays within about
-  16 MB: beyond about `2**22`-`2**23` scores, an epoch takes 2-4x as long on an x86 CPU (an AMD EPYC 7742).
+- On the CPU, it is `2**22 / max(n_nodes, n_features)` samples, from 512 to 65536, so that a batch's score matrix and
+  its copies stay within about 16 MB each: glibc gives blocks beyond 32 MB fresh pages on every allocation, and an epoch
+  then takes up to 2-4x as long on an x86 CPU (an AMD EPYC 7742).
 - On CUDA and MPS, it is the largest batch that still helps speed: `2**28 / n_nodes` samples on the torch path and
   `2**26 / n_features` with the fused kernels. It is reduced if that would not fit in `memory_fraction` of the free GPU
   memory. `memory_fraction` defaults to 0.9 on CUDA and 0.5 on MPS, where the free memory is the memory torch

@@ -277,9 +277,9 @@ class SOM:
         (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
         epoch's update is the same up to float summation order, but over several epochs such rounding differences
         (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-        on the CPU to 2^22 / n_nodes, from 512 to 65536, and on GPUs to 2^28 / n_nodes (where speed levels off;
-        2^26 / n_features with the fused kernel), fewer if that does not fit in memory_fraction of the free GPU
-        memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
+        on the CPU to 2^22 / max(n_nodes, n_features), from 512 to 65536, and on GPUs to 2^28 / n_nodes (where
+        speed levels off; 2^26 / n_features with the fused kernel), fewer if that does not fit in memory_fraction
+        of the free GPU memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
     memory_fraction
         Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
         on CUDA and 0.5 on MPS, whose memory the system and other apps share.
@@ -467,10 +467,11 @@ class SOM:
         elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
             free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
         elif self._device.type == "cpu":
-            # a batch's scores in about 16 MB: above about 2^22-2^23 scores, an epoch takes 2-4x as long (on an AMD EPYC
-            # 7742 with 8 threads, from 22 x 22 to 100 x 100 nodes); below 512 rows, rereading the weights for each
+            # a batch's scores, and its copies, in about 16 MB each: glibc maps blocks above 32 MB afresh on every
+            # allocation, whose page faults make an epoch take up to 2-4x as long (on an AMD EPYC 7742 with 8 threads,
+            # from 5 x 5 to 100 x 100 nodes and 8 to 4000 features); below 512 rows, rereading the weights for each
             # batch costs more than the cache saves at many nodes and features (200 x 200 x 64)
-            return min(1 << 16, max(512, (1 << 22) // (self.n_rows * self.n_cols)))
+            return min(1 << 16, max(512, (1 << 22) // max(self.n_rows * self.n_cols, data.shape[1])))
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
