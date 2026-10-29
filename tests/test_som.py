@@ -1,5 +1,6 @@
 import pickle
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -797,3 +798,14 @@ def test_pca_init_with_one_feature_and_training(data):
 def test_pca_init_of_a_large_offset():
     weights = SOM(3, 1, n_epochs=0, init="pca", device=CPU).fit(np.full((100000, 2), 1e7, np.float32)).weights_
     np.testing.assert_array_equal(weights, np.full((3, 2), 1e7, np.float32))
+
+
+@pytest.mark.parametrize(("platform", "expected"), [("linux", (41943, 2097, 512)), ("darwin", (65536, 8388, 8192))])
+def test_cpu_batch_size_by_nodes_and_features(monkeypatch, platform, expected):
+    monkeypatch.setattr(sys, "platform", platform)
+    sizes = []
+    for (n_rows, n_cols), n_features in (((10, 10), 34), ((10, 10), 2000), ((100, 100), 34)):
+        som = SOM(n_rows, n_cols, device=CPU)
+        som._setup()
+        sizes.append(som._batch_size_for(torch.zeros(4, n_features), None))
+    assert tuple(sizes) == expected
