@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-29)
 
 - `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
   components, centred at the mean, with the longer side of the map along the first component and each side spanning one

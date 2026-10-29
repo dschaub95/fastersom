@@ -4,7 +4,7 @@ requires = [ "hatchling" ]
 
 [project]
 name = "fastersom"
-version = "0.6.0"
+version = "0.7.0"
 description = "Fast batch self-organising maps (SOM) in PyTorch for GPU and CPU"
 readme = "README.md"
 keywords = [ "clustering", "gpu", "kohonen", "pytorch", "self-organizing map", "som", "spatial omics" ]
