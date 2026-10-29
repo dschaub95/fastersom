@@ -17,8 +17,8 @@ can end in a different map.
 : Linear initialisation {cite:p}`Kohonen_2013`, defined as in the SOM Toolbox {cite:p}`Vesanto_2000`, except that the
   Toolbox puts the first component along the rows. The nodes lie on a regular grid in the plane of the samples' first
   two principal components: centred at the mean, with the longer side of the map along the first component, and each
-  side spanning one standard deviation of its component to either
-  side. Unit $(r, c)$ of an $R \times C$ map (with $R \ge C$) starts at
+  side spanning one standard deviation of its component to either side. Node $(r, c)$ of an $R \times C$ map (with
+  $R \ge C$) starts at
 
   $$
   w_{rc} = \mu + s_r \sqrt{\lambda_1}\, v_1 + t_c \sqrt{\lambda_2}\, v_2,
