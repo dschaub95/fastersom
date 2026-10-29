@@ -547,13 +547,6 @@ class SOM:
         picks = rng.choice(len(candidates), n_nodes, replace=len(candidates) < n_nodes)
         return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
 
-    def _compared(self, batch: torch.Tensor) -> torch.Tensor:
-        """The samples as the metric compares them: scaled to unit length (cosine), also centred (correlation)."""
-        if self.metric not in ("cosine", "correlation"):
-            return batch
-        batch = self._centre(batch)
-        return batch / batch.norm(dim=1, keepdim=True).clamp_min(1e-30)
-
     def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
         """Linear initialisation: the grid in the plane of the first two principal components (see init).
 
@@ -587,10 +580,17 @@ class SOM:
         return grid.reshape(self.n_rows * self.n_cols, n_features).float().to(self._device)
 
     def _compared_batches(self, data: torch.Tensor, batch_size: int) -> Iterator[torch.Tensor]:
-        """The samples with a BMU as the metric compares them (see _compared), batch by batch."""
+        """The samples with a BMU as the metric compares them, batch by batch, without empty batches.
+
+        Under cosine and correlation, the samples are scaled to unit length (and centred for correlation).
+        """
         for batch in data.split(batch_size):
             keep = self._has_bmu(batch)
-            yield self._compared(batch if keep is None else batch[keep])
+            if keep is not None:  # cosine, correlation
+                batch = self._centre(batch[keep])
+                batch = batch / batch.norm(dim=1, keepdim=True).clamp_min(1e-30)
+            if len(batch):
+                yield batch
 
     def _mean(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, int]:
         """Mean (float64, on the CPU) and number of the samples with a BMU as the metric compares them.
@@ -603,10 +603,9 @@ class SOM:
         total = torch.zeros(data.shape[1], dtype=torch.float64, device="cpu")
         first, n_samples = None, 0
         for values in self._compared_batches(data, batch_size):
-            if len(values):
-                first = values[0].clone() if first is None else first
-                total += (values - first).sum(0).cpu().double()
-                n_samples += len(values)
+            first = values[0].clone() if first is None else first
+            total += (values - first).sum(0).cpu().double()
+            n_samples += len(values)
         if first is None:
             return total, 0
         return first.cpu().double() + total / n_samples, n_samples
