@@ -218,7 +218,6 @@ class _Summing(NamedTuple):
     """How SOM._sums adds the samples of a fit (see SOM._summing)."""
 
     deterministic: bool
-    mps: bool
     fixed_point: bool = False
     low_shift: int = 0  # the remainders' scale, 2^low_shift
     shift: torch.Tensor | None = None  # MPS: per-feature shifts to fixed point
@@ -768,7 +767,7 @@ class SOM:
         """
         mps = self._device.type == "mps"
         if not deterministic or (mps and kernel not in _METAL):
-            return _Summing(deterministic, mps)
+            return _Summing(deterministic)
         assert magnitude is not None
         low_shift = 62 - n_samples.bit_length()  # remainders within +-0.5, so their sums below 2^61
         # frexp is not implemented on MPS, and n_features values are quick to do on the CPU
@@ -777,9 +776,9 @@ class SOM:
             split = exponent // 2
             first, second = (torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split))
             shift = (low_shift - exponent).int().to(self._device)
-            return _Summing(True, mps, True, low_shift, shift=shift, factors=(first, second))
+            return _Summing(True, True, low_shift, shift=shift, factors=(first, second))
         scale = magnitude.new_ones(len(magnitude), dtype=torch.float64).ldexp_(low_shift - exponent)
-        return _Summing(True, mps, True, low_shift, scale=scale, fixed_rows=max(1, (1 << 21) // len(magnitude)))
+        return _Summing(True, True, low_shift, scale=scale, fixed_rows=max(1, (1 << 21) // len(magnitude)))
 
     def _sums(
         self,
@@ -792,7 +791,7 @@ class SOM:
         """Per-node sums (float32) and counts of the samples assigned by search; samples without a BMU add nothing."""
         if data.device.type == "cpu":  # always deterministic, so fit never asks for deterministic sums there
             return self._sums_cpu(data, search, n_nodes, batch_size)
-        fixed_point, mps, low_shift = summing.fixed_point, summing.mps, summing.low_shift
+        fixed_point, mps, low_shift = summing.fixed_point, data.device.type == "mps", summing.low_shift
         sums = data.new_zeros((n_nodes, data.shape[1]), dtype=torch.long if fixed_point else torch.float32)
         lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
         # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
