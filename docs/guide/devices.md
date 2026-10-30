@@ -76,8 +76,14 @@ variable `PYTORCH_MPS_HIGH_WATERMARK_RATIO`.
 
 ### CPU
 
-The CPU always takes the torch path. It uses as many threads as torch does, which {func}`torch.set_num_threads`
-changes. The CPU is deterministic (see [](reproducibility.md)).
+The CPU always takes the torch path. `fit`, `predict` and the error measures search on a pool of as many threads as
+torch uses, which {func}`torch.set_num_threads` changes, each with torch on a single thread. The samples are split
+into fixed parts, `n_samples / 96` samples each and at least 8192, which every thread searches in chunks of
+`batch_size` samples and, in `fit`, sums per node into sums of its own; the parts' sums are then added in their order.
+torch is set to one thread while the parts run and restored after each pass over the samples, so that the
+neighbourhood update and `transform` keep all of torch's threads. As that changes a process-wide setting, call
+`fit`, `predict` and the error measures on the CPU from one Python thread at a time. The CPU is deterministic, at any
+number of threads (see [](reproducibility.md)).
 
 ## Checking and disabling the fused kernels
 

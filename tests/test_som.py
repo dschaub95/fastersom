@@ -1,6 +1,5 @@
 import pickle
 import subprocess
-import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,6 +7,7 @@ import pytest
 import torch
 
 from fastersom import SOM
+from fastersom._shared import _CPU_MIN_PART_ROWS, _cpu_pool, _cpu_step
 
 CPU = "cpu"
 METRICS = ["euclidean", "manhattan", "cosine", "correlation"]
@@ -253,6 +253,51 @@ def test_batch_size_does_not_change_results(data, metric):
         )
         assert som.quantization_error(data) == pytest.approx(full.quantization_error(data), rel=1e-5)
         assert som.topographic_error(data) == pytest.approx(full.topographic_error(data), abs=1e-3)
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan"])
+def test_cpu_bmus_are_the_nearest_node(metric):
+    # on a grid that float32 keeps exactly, 32 nodes (a mean in 1/32) included, so that ties are exact: the BMUs of
+    # predict and of fit's step, and its counts, are those of a brute-force search, the lowest index on ties, over
+    # several parts of the CPU's pool
+    rng = np.random.default_rng(11)
+    X = rng.integers(-4, 5, size=(3 * _CPU_MIN_PART_ROWS + 5, 3)).astype(np.float32)
+    weights = rng.integers(-4, 5, size=(32, 3)).astype(np.float32)
+    weights[[9, 20, 31]] = weights[4]
+    distances = brute_force_distances(X, weights, metric)
+    expected = distances.argmin(1)  # numpy's argmin: the first index on ties
+    assert ((distances == distances.min(1, keepdims=True)).sum(1) > 1).mean() > 0.1  # many ties
+    som = SOM.from_weights(weights, 4, 8, metric=metric, batch_size=1000, device=CPU)
+    np.testing.assert_array_equal(som.predict(X), expected)
+    data, found = torch.as_tensor(X), torch.empty(len(X), dtype=torch.long)
+    with _cpu_pool(torch.device(CPU)) as pool:
+        assert pool is not None
+        _, counts = _cpu_step(data, som._search(som._weights, None), found, 32, 1000, pool, som._has_bmu)
+    np.testing.assert_array_equal(found, expected)
+    np.testing.assert_array_equal(counts, np.bincount(expected, minlength=32))
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"])  # cosine: with samples without a BMU
+def test_cpu_threads_do_not_change_results(metric):
+    # over several parts of the CPU's pool (_CPU_MIN_PART_ROWS samples each at this size), the last one partial
+    X = np.random.default_rng(6).normal(size=(4 * _CPU_MIN_PART_ROWS + 123, 5)).astype(np.float32)
+    X[::1000] = 0
+    threads = torch.get_num_threads()
+    results = []
+    try:
+        for n_threads in (1, 4):
+            torch.set_num_threads(n_threads)
+            som = SOM(6, 7, n_epochs=3, metric=metric, random_state=0, device=CPU).fit(X)
+            assert torch.get_num_threads() == n_threads  # restored after the pool's passes
+            results.append((som, som.predict(X, return_distance=True), som.topographic_error(X)))
+    finally:
+        torch.set_num_threads(threads)
+    (one, one_predicted, one_error), (four, four_predicted, four_error) = results
+    np.testing.assert_array_equal(one.weights_, four.weights_)
+    np.testing.assert_array_equal(one.labels_, four.labels_)
+    np.testing.assert_array_equal(one_predicted, four_predicted)
+    np.testing.assert_array_equal(one.labels_, one_predicted[0])
+    assert one_error == four_error
 
 
 def test_single_node(data):
@@ -800,14 +845,11 @@ def test_pca_init_of_a_large_offset():
     np.testing.assert_array_equal(weights, np.full((3, 2), 1e7, np.float32))
 
 
-@pytest.mark.parametrize(
-    ("platform", "expected"), [("linux", (41943, 2097, 512, 8192)), ("darwin", (65536, 8388, 8192, 8192))]
-)
-def test_cpu_batch_size_by_nodes_and_features(monkeypatch, platform, expected):
-    monkeypatch.setattr(sys, "platform", platform)
+def test_cpu_batch_size_by_nodes_and_features():
+    # 2^20 values per chunk, from 256 rows (fewer within 2^22 values beyond 16,384 nodes or features) to 8192
     sizes = []
     for (n_rows, n_cols), n_features in (((10, 10), 34), ((10, 10), 2000), ((100, 100), 34), ((200, 200), 34)):
         som = SOM(n_rows, n_cols, device=CPU)
         som._setup()
         sizes.append(som._batch_size_for(torch.zeros(4, n_features), None))
-    assert tuple(sizes) == expected
+    assert tuple(sizes) == (8192, 524, 256, 104)
