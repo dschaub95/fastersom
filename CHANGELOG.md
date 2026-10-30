@@ -16,6 +16,10 @@
   alike. On an M3 Max with 10 threads, an epoch on 40 features takes 0.57-0.81x as long at 10^5 samples (10 x 10 to
   100 x 100 nodes) and 0.42-0.59x at 10^6, and at 200 x 200 nodes x 16 and 64 features 0.57-0.60x (10^5 samples);
   predict 0.42-0.58x at 10^6.
+- The CPU's passes (the pool, its fixed parts, the BMU search and the per-node sums) and the torch path of the
+  euclidean BMU search are in a module `fastersom._shared`, which is kept byte-identical with a sister k-means package
+  and names nodes and centroids alike codebook vectors; `scripts/check_shared.py` compares it and its tests with the
+  other package's checkout.
 
 ## 0.7.0 (2026-10-29)
 

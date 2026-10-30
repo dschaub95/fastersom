@@ -23,10 +23,8 @@ import subprocess
 import sys
 import sysconfig
 import warnings
-from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from math import ceil, isfinite
 from pathlib import Path
@@ -37,6 +35,17 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike
 from tqdm import tqdm
+
+from ._shared import (
+    _assign,
+    _cpu_batch_size,
+    _cpu_map,
+    _cpu_pool,
+    _cpu_step,
+    _euclidean_operands,
+    _euclidean_scorer,
+    _nearest,
+)
 
 _METRICS = ("euclidean", "manhattan", "cosine", "correlation")
 _INITS = ("random", "sample", "pca")
@@ -54,15 +63,6 @@ _FUSED_MAX_FEATURES = 128
 _FAST_TF32 = ((8, 0), (9, 0), (10, 0))
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
-# the CPU's fixed parts: n_samples / _CPU_PARTS samples each, at least _CPU_MIN_PART_ROWS, each searched and summed by
-# one thread into sums of its own, which are then added in the parts' order, so that the sums do not depend on the
-# number of threads. From 96 x 2^13 samples on, 96 parts are 4 per thread at 24 threads, 8 at 12 and 12 at 8, so that
-# the threads finish together. Each part and each chunk costs a few torch calls, each of which releases and retakes the
-# GIL, about 10-20 us of serial time under contention; small parts add parts and, at few nodes, shrink the chunk below
-# the default of 8192 rows. Hence at least 2^13 rows: on an M3 Max with 10 threads, an epoch of 3 x 10^5 samples x 40
-# features at 10 x 10 nodes took 1.7x as long with parts of 2^12 rows
-_CPU_PARTS = 96
-_CPU_MIN_PART_ROWS = 1 << 13
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
 # with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
@@ -220,50 +220,6 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
     elif device.type == "mps":
         torch.mps.synchronize()
-
-
-@contextmanager
-def _cpu_pool(device: torch.device) -> Iterator[ThreadPoolExecutor | None]:
-    """A pool of torch.get_num_threads() threads for _cpu_map while the block runs, None on other devices.
-
-    One pool serves a whole fit or predict, not a new one per epoch; it is shut down on leaving, also on an error.
-    """
-    if device.type != "cpu":
-        yield None
-        return
-    with ThreadPoolExecutor(torch.get_num_threads()) as pool:
-        yield pool
-
-
-def _cpu_map[T](
-    pool: ThreadPoolExecutor,
-    work: Callable[[torch.Tensor, torch.Tensor, int], T],
-    data: torch.Tensor,
-    labels: torch.Tensor,
-    batch_size: int,
-) -> Iterator[T]:
-    """work(samples, labels, rows per chunk) of every fixed part (see _CPU_PARTS) on the pool, in the parts' order.
-
-    Each of the pool's threads runs torch on a single thread, as the small chunks of a part gain nothing from torch's
-    threads: torch is set to one thread while the parts run and to its number of threads again afterwards (also on an
-    error), so that the work between them, such as the neighbourhood update, keeps all of torch's threads. At most two
-    parts per thread are submitted ahead of the one consumed, so that per-part sums (n_nodes x n_features each) stay
-    within that many rather than _CPU_PARTS of them. Consume the results fully, which restores torch's threads.
-    """
-    rows = max(_CPU_MIN_PART_ROWS, -(-len(data) // _CPU_PARTS))
-    chunk = min(batch_size, rows)
-    threads = torch.get_num_threads()
-    torch.set_num_threads(1)
-    try:
-        pending: deque[Future[T]] = deque()
-        for part, out in zip(data.split(rows), labels.split(rows), strict=True):
-            if len(pending) == 2 * threads:
-                yield pending.popleft().result()
-            pending.append(pool.submit(work, part, out, chunk))
-        while pending:
-            yield pending.popleft().result()
-    finally:
-        torch.set_num_threads(threads)
 
 
 class SOM:
@@ -520,13 +476,8 @@ class SOM:
             free, fraction = torch.cuda.mem_get_info(self._device)[0] + cached, 0.9
         elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
             free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
-        elif self._device.type == "cpu":
-            # the rows of a chunk, which one thread of the pool searches at a time (see _cpu_map): its scores, and its
-            # copies, within 2^20 values (4 MB), which a thread's caches serve; at least 256 rows, as fewer only add
-            # calls, but within 2^22 values (16 MB) beyond 16,384 nodes or features, as glibc maps blocks above 32 MB
-            # afresh on every allocation, whose page faults made an epoch take up to 2-4x as long (AMD EPYC 7742)
-            largest = max(self.n_rows * self.n_cols, data.shape[1])
-            return max(1, min(8192, max(min(256, (1 << 22) // largest), (1 << 20) // largest)))
+        elif self._device.type == "cpu":  # the chunk of one thread of the pool
+            return _cpu_batch_size(self.n_rows * self.n_cols, data.shape[1])
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
@@ -689,9 +640,7 @@ class SOM:
         correlation). The small weight matrix is scaled and negated, not the batch x nodes scores.
         """
         if self.metric == "euclidean":
-            centre = weights.mean(0)
-            weights = weights - centre
-            return -2 * weights, (weights**2).sum(1), centre
+            return _euclidean_operands(weights)
         weights = self._centre(weights)
         return weights / -weights.norm(dim=1, keepdim=True).clamp_min(1e-12), None, None
 
@@ -700,25 +649,17 @@ class SOM:
 
         The operands are computed once for all batches: per batch, their n_nodes x n_features copies cost more than
         small batches' matrix products (on the CPU, 100 x 100 nodes x 1000 features fit 2.3x as fast at 512 samples).
-        The centre stays subtracted from every batch rather than taken into the bias, (x - c).v + b = x.v + (b - c.v),
-        which loses nearby nodes to rounding at large offsets unless the samples were centred first: with a centred copy
-        of the samples, an epoch on the CPU was at most 9% shorter (M3 Max, 10 threads, 40 to 1000 features), as the
-        pool's chunks keep their copies in cache.
+        Under euclidean the centre stays subtracted from every batch (_euclidean_scorer's centred=False): taking it into
+        the bias loses nearby nodes to rounding at large offsets unless the samples were centred first, and with a
+        centred copy of the samples an epoch on the CPU was at most 9% shorter (M3 Max, 10 threads, 40 to 1000
+        features), as the pool's chunks keep their copies in cache.
         """
         if self.metric == "manhattan":
             return lambda batch: _cdist(batch, weights, 1)
-        nodes, bias, centre = self._operands(weights)
-        if bias is None:
-            return lambda batch: self._centre(batch) @ nodes.T
-        assert centre is not None  # euclidean has both
-        if weights.device.type == "mps":
-            # MPS's addmm expands the bias to a second batch x nodes matrix, and adding it after the matmul is a
-            # further pass over the scores, which is slower at the small batches of large maps; a column of ones in
-            # the batch and the node norms in the weights make the bias part of a single matmul. On CUDA addmm fuses
-            # the bias into the matmul (cuBLASLt epilogue), so it stays there
-            extended = torch.cat([nodes, bias[:, None]], 1).T
-            return lambda batch: torch.cat([batch - centre, batch.new_ones(len(batch), 1)], 1) @ extended
-        return lambda batch: torch.addmm(bias, batch - centre, nodes.T)
+        if self.metric == "euclidean":
+            return _euclidean_scorer(weights)
+        nodes = self._operands(weights)[0]
+        return lambda batch: self._centre(batch) @ nodes.T
 
     def _scores(self, batch: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         """Per-node score to minimise of one batch (see _scorer)."""
@@ -738,12 +679,7 @@ class SOM:
             scores = self._scorer(weights)
             if top2:
                 return lambda batch: scores(batch).topk(2, 1, largest=False).indices
-            if weights.device.type != "cpu":  # GPUs keep argmin: on MPS min(1) took 1.6-1.9x as long (M3 Max, 100 to
-                return lambda batch: scores(batch).argmin(1)  # 40,000 nodes); on CUDA it was not measured
-            # on the CPU, min(1)'s indices: on one thread, argmin(1) took 74-80% of a chunk's search and min(1) 31-47%
-            # less (M3 Max, 100 to 40,000 nodes x 40 features). Both return the first minimal index on ties, as torch
-            # documents
-            return lambda batch: scores(batch).min(1).indices
+            return _nearest(scores, weights.device)
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
         if kernel == "metal-float16":
@@ -831,40 +767,6 @@ class SOM:
         grid = (gaussian(self.n_rows) @ values.view(self.n_rows, -1)).view(self.n_rows, self.n_cols, -1)
         return (gaussian(self.n_cols) @ grid).view(len(values), -1)
 
-    def _cpu_step(
-        self,
-        data: torch.Tensor,
-        search: Callable[[torch.Tensor], torch.Tensor],
-        labels: torch.Tensor,
-        n_nodes: int,
-        batch_size: int,
-        pool: ThreadPoolExecutor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Assigns the samples and sums them per node on the CPU, part by part on the pool (see _cpu_map).
-
-        Each fixed part is searched and summed in chunks of batch_size by one thread into sums of its own, which are added
-        in the parts' order: the same sums at any number of threads. Samples without a BMU (cosine, correlation) go to
-        an extra node, n_nodes, which is dropped, rather than being copied out of their chunk.
-        """
-
-        def part_sums(part: torch.Tensor, out: torch.Tensor, chunk: int) -> tuple[torch.Tensor, torch.Tensor]:
-            sums = part.new_zeros(n_nodes + 1, part.shape[1])
-            for batch, rows in zip(part.split(chunk), out.split(chunk), strict=True):
-                found = search(batch)
-                keep = self._has_bmu(batch)
-                if keep is not None:
-                    found.masked_fill_(~keep, n_nodes)
-                rows.copy_(found)
-                sums.index_add_(0, found, batch)
-            return sums, torch.bincount(out, minlength=n_nodes + 1)
-
-        sums = data.new_zeros(n_nodes + 1, data.shape[1])
-        counts = torch.zeros(n_nodes + 1, dtype=torch.long)
-        for part_sum, part_count in _cpu_map(pool, part_sums, data, labels, batch_size):
-            sums += part_sum
-            counts += part_count
-        return sums[:n_nodes], counts[:n_nodes]
-
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
         """Fits the map, starting from the initialisation given by init.
 
@@ -927,7 +829,7 @@ class SOM:
                 sigma = self._sigma0 * (self._sigma1 / self._sigma0) ** (t / self.n_epochs)
                 search = self._search(weights, kernel, magnitude=magnitude)
                 if pool is not None:  # the CPU, always deterministic, so deterministic is False there
-                    sums, counts = self._cpu_step(data, search, labels, n_nodes, batch_size, pool)
+                    sums, counts = _cpu_step(data, search, labels, n_nodes, batch_size, pool, self._has_bmu)
                 else:
                     sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
                     lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
@@ -1054,17 +956,8 @@ class SOM:
         kernel = self._kernel(data.shape[1], top2=True)
         search = self._search(self._weights, kernel, top2=True)
         nodes = torch.empty(len(data), 2, dtype=torch.long, device=data.device)
-
-        def part_nodes(part: torch.Tensor, out: torch.Tensor, chunk: int) -> None:
-            for batch, rows in zip(part.split(chunk), out.split(chunk), strict=True):
-                rows.copy_(search(batch))
-
         with _cpu_pool(self._device) as pool:
-            if pool is not None:
-                for _ in _cpu_map(pool, part_nodes, data, nodes, self._batch_size_for(data, kernel)):
-                    pass
-            else:
-                part_nodes(data, nodes, self._batch_size_for(data, kernel))
+            _assign(data, search, nodes, self._batch_size_for(data, kernel), pool=pool)
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
         return float((offset > 1).cpu().double().mean())
 

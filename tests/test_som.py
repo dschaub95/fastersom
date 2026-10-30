@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from fastersom import SOM
-from fastersom._som import _CPU_MIN_PART_ROWS, _cpu_pool
+from fastersom._shared import _CPU_MIN_PART_ROWS, _cpu_pool, _cpu_step
 
 CPU = "cpu"
 METRICS = ["euclidean", "manhattan", "cosine", "correlation"]
@@ -272,7 +272,7 @@ def test_cpu_bmus_are_the_nearest_node(metric):
     data, found = torch.as_tensor(X), torch.empty(len(X), dtype=torch.long)
     with _cpu_pool(torch.device(CPU)) as pool:
         assert pool is not None
-        _, counts = som._cpu_step(data, som._search(som._weights, None), found, 32, 1000, pool)
+        _, counts = _cpu_step(data, som._search(som._weights, None), found, 32, 1000, pool, som._has_bmu)
     np.testing.assert_array_equal(found, expected)
     np.testing.assert_array_equal(counts, np.bincount(expected, minlength=32))
 
