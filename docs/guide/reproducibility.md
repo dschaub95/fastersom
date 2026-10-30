@@ -9,7 +9,9 @@ with a BMU under the metric). Training itself is not random: every epoch updates
 
 ## Deterministic fitting on GPUs
 
-On the CPU, `fit` gives the same map in every run with the same data and parameters.
+On the CPU, `fit` gives the same map in every run with the same data and parameters, at any number of threads: the
+samples are searched and summed in fixed parts that depend on the number of samples only, and the parts' sums are
+added in their order (see [](devices.md)).
 
 On CUDA and MPS, `fit` sums the samples per node with atomic additions, whose order varies from run to run. The sums
 then differ in their last bits, and over several epochs this can flip the BMUs of near-tied samples, so that two runs

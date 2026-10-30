@@ -67,9 +67,8 @@ Options:
   vary in order. On CUDA it sums the samples per node as 64-bit fixed-point integers (on an A100 up to 2x slower on
   small maps, 3-10% from 100 x 100 nodes), on MPS likewise with the [Metal kernels](#fused-metal-kernels) (on an M3
   Max 1.4x slower at 10 x 10 nodes, 1.14x at 30 x 30, the same from 100 x 100) and else with a matrix product (1.2-1.8x
-  slower). It is also used under
-  `torch.use_deterministic_algorithms(True)`. The CPU is always deterministic; maps from different devices still differ
-  by float rounding.
+  slower). It is also used under `torch.use_deterministic_algorithms(True)`. The CPU is always deterministic, at any
+  number of threads; maps from different devices still differ by float rounding.
 - `fused=False` turns off the fused [CUDA](#fused-cuda-kernels) and [Metal](#fused-metal-kernels) kernels of the BMU
   search and takes the torch path instead, without compiling anything. It only matters on CUDA and MPS.
 - `precision="float16"` lets `fit`'s BMU search round samples and nodes to 11 significant bits, summing the products in
