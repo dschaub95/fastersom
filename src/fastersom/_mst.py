@@ -278,7 +278,7 @@ def _find(parent: np.ndarray, node: int) -> int:
 def _boruvka(
     n: int, search: _Search, recheck: _Recheck | None, QT: np.ndarray, manhattan: bool
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Edges (n - 1, 2) and their W, sorted by (W, lower index, higher index).
+    """Edges (n - 1, 2), the lower index first, and their W, in the order they were found.
 
     Components are labelled by their smallest point. Each component's edge is the least of its rows' by the strict
     order; with certified rows these edges form a forest, and without certification (recheck None) the merge in the
@@ -308,9 +308,7 @@ def _boruvka(
         labels = parent[labels]
         rows = points[labels[nearest] == labels]  # rows whose nearest point joined their component
     low, high = (np.array([edge[k] for edge in found], np.int64) for k in (0, 1))
-    weight = np.array([edge[2] for edge in found])
-    order = np.lexsort((high, low, weight))
-    return np.stack([low[order], high[order]], 1), weight[order]
+    return np.stack([low, high], 1), np.array([edge[2] for edge in found])
 
 
 def minimum_spanning_tree(
