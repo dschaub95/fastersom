@@ -538,13 +538,25 @@ class SOM:
         exponential default, and the last epoch is wider (with a linear decay to 0, sigma_initial / n_epochs). A single
         epoch uses sigma_initial. Defaults to ``"after_last_epoch"`` under the exponential schedule, which keeps the
         width schedule of fastersom 0.7.0, and to ``"last_epoch"`` under the others. Keyword only.
+    stream
+        Whether fit, predict, transform and the error measures read X from the host batch by batch rather than copy
+        all of it to the device, for data beyond the device's memory (or, from a memmap, the CPU's). X can then be
+        anything of shape (n_samples, n_features) whose row slices are arrays or tensors, such as a numpy memmap, an
+        h5py or zarr dataset or a CPU tensor, and of shape (..., n_features) a C-contiguous numpy array or tensor. Each
+        batch X[i:j] is converted to float32 and, on CUDA, read by a thread into one of two pinned 64 MB buffers and
+        copied on a second CUDA stream while the previous batch is searched. fit reads X once more before the epochs,
+        for the check that it is finite and, with deterministic=True, its range; init="pca" reads it twice more and
+        init="sample" reads its rows one by one. The map is that of the same batches without stream, bit for bit
+        wherever a fit is deterministic. fit sets no ``labels_``, an int64 per sample (call predict). predict and the
+        error measures still hold a BMU and a distance per sample on the device, and raise for samples that are not
+        finite only at the end of their pass. Keyword only.
 
     Attributes
     ----------
     weights_
         Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
     labels_
-        BMU of every training sample under the final weights. Not set by from_weights.
+        BMU of every training sample under the final weights. Not set by from_weights, nor with stream=True.
     n_features_in_
         Number of features seen in fit.
     """
@@ -1217,7 +1229,7 @@ class SOM:
         X
             Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like, torch tensor
             or DLPack array such as CuPy. Any real values are fine; data is copied to the device once and stays
-            there.
+            there, or with stream=True read from the host in every epoch (see stream).
         y
             Ignored.
 

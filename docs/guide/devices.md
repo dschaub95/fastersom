@@ -13,9 +13,48 @@ som = SOM(30, 30, device="cuda:1")
 
 `fit` converts `X` to float32 and copies it to the device once; all epochs then run there, so the data,
 `n_samples x n_features x 4` bytes, has to fit in the device's memory next to the working memory of the BMU search
-(see [](batch-size.md)). `predict`, `transform` and the error measures copy their input in the same way. A fitted map
-pickles without device tensors: unpickled, it moves to the configured device if that is available, else to the
-default one, so a map fitted on a GPU loads on a CPU-only machine.
+(see [](batch-size.md)), unless it is streamed (see below). `predict`, `transform` and the error measures copy their
+input in the same way. A fitted map pickles without device tensors: unpickled, it moves to the configured device if
+that is available, else to the default one, so a map fitted on a GPU loads on a CPU-only machine.
+
+## Data larger than the device's memory
+
+With `stream=True`, `X` stays on the host and every epoch reads it batch by batch, so that only a few batches are on
+the device at a time. The batch update needs no more than that: each epoch adds the batches into per-node sums and
+counts, whose size does not depend on the number of samples.
+
+```python
+import numpy as np
+from fastersom import SOM
+
+X = np.load("X.npy", mmap_mode="r")  # on disk, read as needed
+som = SOM(30, 30, stream=True).fit(X)
+labels = som.predict(X)
+```
+
+- `X` can be anything of shape `(n_samples, n_features)` whose row slices `X[i:j]` are NumPy arrays or torch tensors:
+  a NumPy array or memmap, an h5py or zarr dataset, or a CPU tensor. fastersom reads nothing but such slices, and needs
+  neither h5py nor zarr itself. Inputs of shape `(..., n_features)` are flattened only as C-contiguous NumPy arrays or
+  tensors, whose reshape is a view.
+- Each batch is converted to float32 as it is read. On CUDA a thread reads it into one of two pinned 64 MB buffers
+  (a larger batch in several parts) and a second CUDA stream copies it to the GPU, both while the previous batch is
+  searched. On MPS each batch is copied as it is, and on the CPU it is used where it was read.
+- `fit` reads `X` once before the epochs, to check that it is finite and to find its range per feature, which
+  `deterministic=True` needs. `init="pca"` reads it twice more, for the mean and the covariance; `init="sample"` reads
+  only the rows it picks, and under cosine and correlation notes in the first pass which samples have a BMU (a byte
+  per sample on the host).
+- With the same batches, a streamed fit gives the same map as one in memory, bit for bit wherever a fit is
+  deterministic (on the CPU, and with `deterministic=True`). Pass an explicit `batch_size` to compare the two, as the
+  default depends on the free memory.
+- `fit` does not set `labels_`, which would hold an int64 per sample; `predict(X)` returns them, and `fit_predict`
+  calls it. `predict`, `transform` and the error measures read `X` once, and raise for values that are not finite only
+  at the end of that pass. `predict` and the error measures still keep a BMU and a distance per sample on the device,
+  12 bytes per sample.
+
+The streamed fit is bound by reading the data rather than by the search. On an A100, a 32 x 32 map on 20 million
+samples x 50 features (4 GB) in float32, from a memmap in the page cache, took 0.33 s per epoch, about 12 GB/s, against
+0.11-0.15 s with the data in GPU memory: the reading thread copies from the page cache at 9-15 GB/s, the copies to the
+GPU run at 25 GB/s. Data that is not in the page cache is read at the speed of the disk.
 
 ## What runs where
 

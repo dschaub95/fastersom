@@ -28,6 +28,14 @@
     35 features at most 0.11 s per epoch at 300 x 300 nodes).
   - `precision="float16"` keeps the search in float32 under the mexican hat, whose negative weights can move the
     nodes beyond the range of the samples and initial weights that half's scaling is checked against.
+- `stream=True` (keyword only) fits from data on the host, read batch by batch in every epoch rather than copied to the
+  device, for data beyond the device's memory: a NumPy memmap, an h5py or zarr dataset, or anything else whose row
+  slices are arrays or tensors (see "Data larger than the device's memory" in the user guide on devices). On CUDA the
+  batches pass through two pinned buffers, read by a thread and copied on a second CUDA stream while the previous
+  batch is searched; on an A100, 4 GB from the page cache took 0.33 s per epoch, about 12 GB/s. `predict`, `transform`
+  and the error measures stream too. With the same batches the map is the same as in memory, bit for bit wherever a
+  fit is deterministic. `fit` then sets no `labels_` (`predict` gives them). Maps pickled by 0.7.0 load with
+  `stream=False` (issue #34).
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
 
