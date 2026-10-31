@@ -578,8 +578,6 @@ class SpanningTree:
                     seen[child] = True
                     parent[child], depth[child], distance[child] = node, depth[node] + 1, distance[node] + lengths[k]
                     stack.append(child)
-        if len(preorder) < n:
-            raise ValueError("the edges do not connect all nodes, so they are no spanning tree")
         size = [1] * n
         for node in reversed(preorder[1:]):
             size[parent[node]] += size[node]
