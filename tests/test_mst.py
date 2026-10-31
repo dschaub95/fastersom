@@ -432,6 +432,19 @@ def test_unit_roundoff_under_the_per_backend_precision_api(monkeypatch):
     assert _mst._unit_roundoff(torch.float64, torch.device("cpu"), matmul=True) == 2.0**-53
 
 
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan"])
+@pytest.mark.parametrize("n_features", [254, 300])
+def test_coarse_matmul_precision_certifies_nothing_where_its_bound_fails(monkeypatch, metric, n_features):
+    # under bfloat16's unit roundoff, gamma_(d+2) has no finite bound from 254 features (before, a division by zero
+    # at 254 and a negative bound beyond, which certified every row)
+    monkeypatch.setattr(_mst, "_unit_roundoff", lambda dtype, device, matmul: 2.0**-8)
+    X = torch.as_tensor(np.random.default_rng(6).normal(size=(50, n_features)), dtype=torch.float32)
+    search = _mst._TorchSearch(X, metric == "manhattan", 16)
+    _, certified = search.nearest(np.arange(50), torch.arange(50), certify=True)
+    assert certified is not None
+    assert not certified.any()
+
+
 def test_methods_do_not_take_the_models_batch_size():
     som = SOM(10, 10, n_epochs=2, random_state=0, device="cpu", batch_size=2**16).fit(blobs())
     assert_tree_equal(som.minimum_spanning_tree(), *reference(som.weights_))

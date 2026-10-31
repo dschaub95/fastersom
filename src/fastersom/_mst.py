@@ -41,8 +41,11 @@ _PAIRS = 1 << 22
 
 
 def _gamma(n: int, u: float) -> float:
-    """Higham's gamma_n = n u / (1 - n u), the relative error bound of n roundings of unit roundoff u."""
-    return n * u / (1 - n * u)
+    """Higham's gamma_n = n u / (1 - n u), the relative error bound of n roundings of unit roundoff u.
+
+    inf where n u >= 1 (from 254 features at bfloat16's u, 2046 at TF32's), where no bound holds: nothing is certified.
+    """
+    return n * u / (1 - n * u) if n * u < 1 else np.inf
 
 
 def _unit_roundoff(dtype: torch.dtype, device: torch.device, matmul: bool) -> float:
