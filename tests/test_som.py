@@ -454,6 +454,15 @@ def test_sigma_zero_is_batch_kmeans(data):
     np.testing.assert_array_equal(som.weights_[empty], before.weights_[empty])
 
 
+def test_inverse_schedule_from_a_tiny_width():
+    # 1 + (s0 / s1 - 1) rounds to 0 for s0 = 1e-20 and s1 = 1, which the inverse schedule must not divide by
+    for end, last in (("last_epoch", 1.0), ("after_last_epoch", 2e-20)):
+        kwargs = {"sigma_initial": 1e-20, "sigma_final": 1, "sigma_schedule": "inverse", "schedule_end": end}
+        sigmas = neighbourhood_som(4, 4, n_epochs=2, **kwargs)._sigmas
+        assert sigmas[0] == 1e-20
+        assert sigmas[1] == pytest.approx(last, rel=1e-12)
+
+
 def test_widths_as_scalars():
     # any real scalar, also a 0-d array or tensor, is a width
     tensors = [torch.tensor(2.5, dtype=torch.bfloat16)] + [torch.tensor(2.5, device="cuda")] * torch.cuda.is_available()

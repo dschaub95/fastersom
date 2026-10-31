@@ -906,7 +906,8 @@ class SOM:
         if self.sigma_schedule == "linear":
             widths = [sigma0 + (sigma1 - sigma0) * t / span for t in range(n_epochs)]
         elif self.sigma_schedule == "inverse":
-            widths = [sigma0 / (1 + (sigma0 / sigma1 - 1) * t / span) for t in range(n_epochs)]
+            # s0 / (1 + (s0 / s1 - 1) s) as s0 s1 / ((1 - s) s1 + s s0), which 1 + (s0 / s1 - 1) can round to 0 in
+            widths = [sigma0 * sigma1 / ((1 - t / span) * sigma1 + t / span * sigma0) for t in range(n_epochs)]
         else:
             widths = [sigma0 * (sigma1 / sigma0) ** (t / span) for t in range(n_epochs)]
         if end == "last_epoch" and n_epochs > 1:
