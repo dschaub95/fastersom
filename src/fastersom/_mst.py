@@ -205,7 +205,7 @@ class _TorchSearch:
 
 
 class _Search(Protocol):
-    """A masked nearest-point search as _TorchSearch.nearest, which a fused kernel's can replace in _search."""
+    """A masked nearest-point search as _TorchSearch.nearest, which a fused kernel's can replace."""
 
     device: torch.device
 
@@ -217,12 +217,6 @@ class _Search(Protocol):
 def _search_dtype(device: torch.device, exact: bool) -> torch.dtype:
     """float64 on the CPU when exact, whose BLAS is half as fast in it but needs almost no rechecks; else float32."""
     return torch.float64 if exact and device.type == "cpu" else torch.float32
-
-
-def _search(engine: SOM, points: torch.Tensor, exact: bool) -> _Search:
-    """The masked search on the engine's device, the torch path."""
-    dtype = _search_dtype(engine._device, exact)
-    return _TorchSearch(points.to(engine._device, dtype), engine.metric == "manhattan", _block(engine, points))
 
 
 def _block(engine: SOM, points: torch.Tensor) -> int:
@@ -403,7 +397,8 @@ def minimum_spanning_tree(
         engine.n_rows = len(distinct)
         Q = Q[torch.as_tensor(distinct)]
         QT = np.ascontiguousarray(Q.numpy().T)
-        search, block = _search(engine, Q, exact), _block(engine, Q)
+        block = _block(engine, Q)
+        search = _TorchSearch(Q.to(engine._device, _search_dtype(engine._device, exact)), manhattan, block)
         recheck = _Recheck(engine, Q, QT, block) if exact else None
         edges, squared = _boruvka(len(distinct), search, recheck, QT, manhattan)
         edges = distinct[edges]
