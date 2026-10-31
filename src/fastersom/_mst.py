@@ -275,6 +275,21 @@ def _find(parent: np.ndarray, node: int) -> int:
     return node
 
 
+def _union(parent: np.ndarray, a: int, b: int) -> tuple[int, int]:
+    """Join the sets of a and b under the smaller root; returns (that root, the other), equal if already joined."""
+    first, second = _find(parent, a), _find(parent, b)
+    root, other = min(first, second), max(first, second)
+    parent[other] = root
+    return root, other
+
+
+def _roots(parent: np.ndarray) -> np.ndarray:
+    """Every node's root, by pointer jumping."""
+    while not np.array_equal(parent[parent], parent):
+        parent = parent[parent]
+    return parent
+
+
 def _boruvka(
     n: int, search: _Search, recheck: _Recheck | None, QT: np.ndarray, manhattan: bool
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -299,12 +314,10 @@ def _boruvka(
         order = np.lexsort((high, low, weight, labels))
         kept = order[np.r_[True, labels[order[1:]] != labels[order[:-1]]]]  # each component's least edge
         for edge in kept[np.lexsort((high[kept], low[kept], weight[kept]))]:
-            first, second = _find(parent, int(labels[edge])), _find(parent, int(labels[nearest[edge]]))
-            if first != second:
-                parent[max(first, second)] = min(first, second)
+            root, other = _union(parent, int(labels[edge]), int(labels[nearest[edge]]))
+            if root != other:
                 found.append((low[edge], high[edge], weight[edge]))
-        while not np.array_equal(parent[parent], parent):
-            parent = parent[parent]
+        parent = _roots(parent)
         labels = parent[labels]
         rows = points[labels[nearest] == labels]  # rows whose nearest point joined their component
     low, high = (np.array([edge[k] for edge in found], np.int64) for k in (0, 1))
@@ -439,10 +452,9 @@ class SpanningTree:
             raise ValueError(f"edges must be node indices in [0, {self.n_nodes})")
         parent = np.arange(self.n_nodes)
         for a, b in edges.tolist():  # n_nodes - 1 edges without a cycle connect all nodes
-            first, second = _find(parent, a), _find(parent, b)
-            if first == second:
+            root, other = _union(parent, a, b)
+            if root == other:
                 raise ValueError("the edges contain a cycle, so they are no spanning tree")
-            parent[max(first, second)] = min(first, second)
 
     def degrees(self) -> np.ndarray:
         """Number of edges at every node, shape (n_nodes,), int64."""
@@ -488,11 +500,8 @@ class SpanningTree:
             kept = np.asarray(self.edges)[np.asarray(self.weights) < distance_threshold]
         parent = np.arange(self.n_nodes)
         for a, b in kept.tolist():
-            first, second = _find(parent, a), _find(parent, b)
-            parent[max(first, second)] = min(first, second)
-        while not np.array_equal(parent[parent], parent):
-            parent = parent[parent]
-        return np.unique(parent, return_inverse=True)[1].astype(np.int64)
+            _union(parent, a, b)
+        return np.unique(_roots(parent), return_inverse=True)[1].astype(np.int64)
 
     def linkage(self) -> np.ndarray:
         """Single-linkage hierarchy in scipy's format, shape (n_nodes - 1, 4), float64.
@@ -505,10 +514,9 @@ class SpanningTree:
         Z = np.empty((n - 1, 4))
         parent, cluster, size = np.arange(n), np.arange(n), np.ones(n, np.int64)
         for k, (a, b) in enumerate(np.asarray(self.edges).tolist()):
-            first, second = _find(parent, a), _find(parent, b)
-            ids = sorted((cluster[first], cluster[second]))
-            root, other = min(first, second), max(first, second)
-            parent[other], cluster[root], size[root] = root, n + k, size[root] + size[other]
+            root, other = _union(parent, a, b)
+            ids = sorted((cluster[root], cluster[other]))
+            cluster[root], size[root] = n + k, size[root] + size[other]
             Z[k] = ids[0], ids[1], self.weights[k], size[root]
         return Z
 
