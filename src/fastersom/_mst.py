@@ -30,9 +30,8 @@ import numpy as np
 import torch
 from numpy.typing import ArrayLike
 
-from ._som import SOM, _cdist, _is_int
+from ._som import _METRICS, SOM, _cdist, _is_int
 
-_METRICS = ("euclidean", "manhattan", "cosine", "correlation")
 _F64 = 2.0**-53  # unit roundoff of float64
 # rows x points scores per block on the CPU (128 MB in float64), beyond which the blocks gain no speed
 _CPU_SCORES = 1 << 24
@@ -166,7 +165,9 @@ class _TorchSearch:
     def nearest(self, rows: np.ndarray, labels: torch.Tensor, certify: bool) -> tuple[np.ndarray, np.ndarray | None]:
         """Each row's nearest point outside its component, and with certify whether it is certainly the nearest by W."""
         nearest, certified = np.empty(len(rows), np.int64), np.empty(len(rows), bool) if certify else None
-        host_labels = labels.cpu().numpy() if certify else None
+        if certify:  # per point, the number of points outside its component
+            host_labels = labels.cpu().numpy()
+            outside = len(self.points) - np.bincount(host_labels, minlength=len(self.points))[host_labels]
         for start in range(0, len(rows), self.block):
             part = rows[start : start + self.block]
             scores = self.scores(torch.as_tensor(part, device=self.device), labels)
@@ -176,11 +177,9 @@ class _TorchSearch:
                 first = indices[:, 0].cpu().numpy()
                 nearest[start : start + len(part)] = first
                 assert certified is not None
-                assert host_labels is not None
                 # a second score of inf is certain only where a single point lies outside the row's component (not
                 # after an overflow), and a non-finite best never
-                outside = len(self.points) - np.bincount(host_labels, minlength=len(self.points))[host_labels[part]]
-                finite = np.isfinite(best) & (np.isfinite(second) | ((second == np.inf) & (outside == 1)))
+                finite = np.isfinite(best) & (np.isfinite(second) | ((second == np.inf) & (outside[part] == 1)))
                 certified[start : start + len(part)] = finite & self._separated(part, best, second, first)
             else:
                 nearest[start : start + len(part)] = scores.argmin(1).cpu().numpy()
@@ -385,7 +384,7 @@ def minimum_spanning_tree(
     )
     engine._setup()
     data = engine._check_X(X)
-    n = engine.n_rows = len(data)  # the search's nodes, for its batch size
+    n = len(data)
     Q = data.cpu().double()
     if metric in ("cosine", "correlation"):
         undefined = Q.amax(1) == Q.amin(1) if metric == "correlation" else (Q == 0).all(1)
@@ -402,7 +401,7 @@ def minimum_spanning_tree(
     distinct, representative = np.sort(first), first[inverse.ravel()]
     edges, squared = np.zeros((0, 2), np.int64), np.zeros(0)
     if len(distinct) > 1:
-        engine.n_rows = len(distinct)
+        engine.n_rows = len(distinct)  # the search's nodes, for its batch size
         Q = Q[torch.as_tensor(distinct)]
         QT = np.ascontiguousarray(Q.numpy().T)
         block = _block(engine, Q)
