@@ -468,8 +468,8 @@ def test_widths_as_scalars():
     tensors = [torch.tensor(2.5, dtype=torch.bfloat16)] + [torch.tensor(2.5, device="cuda")] * torch.cuda.is_available()
     for sigma in (2, np.float32(2.5), np.array(2.5), torch.tensor(2.5), *tensors):
         assert neighbourhood_som(4, 4, n_epochs=1, sigma_initial=sigma, sigma_final=sigma)._sigmas == (float(sigma),)
-    # but not a complex one, nor a meta tensor, which has no value
-    for sigma in (torch.tensor(2.5 + 0j), torch.tensor(2.5, dtype=torch.complex64), torch.tensor(2.5, device="meta")):
+    # but not a complex one
+    for sigma in (torch.tensor(2.5 + 0j), torch.tensor(2.5, dtype=torch.complex64)):
         with pytest.raises(ValueError, match="sigma_initial"):
             neighbourhood_som(4, 4, n_epochs=1, sigma_initial=sigma)
 

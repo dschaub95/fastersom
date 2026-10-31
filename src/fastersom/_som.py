@@ -190,9 +190,9 @@ def _width(name: str, value) -> float:
     """A neighbourhood width given as any real scalar (also a 0-d array or tensor), as a float finite and >= 0."""
     width = None
     if not isinstance(value, bool | np.bool_ | str | bytes) and np.ndim(value) == 0:
-        # a tensor's is_complex, as np.iscomplexobj copies it to numpy, which fails on bfloat16, CUDA and meta
+        # a tensor's is_complex, as np.iscomplexobj copies it to numpy, which fails on bfloat16 and CUDA
         real = not value.is_complex() if isinstance(value, torch.Tensor) else not np.iscomplexobj(value)
-        with suppress(TypeError, ValueError, OverflowError, RuntimeError):  # e.g. None, 10**400 or a meta tensor
+        with suppress(TypeError, ValueError, OverflowError):  # e.g. None or 10**400
             width = float(value) if real else None
     if width is None or not isfinite(width) or width < 0:
         raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
