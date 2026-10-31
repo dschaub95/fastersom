@@ -620,7 +620,7 @@ def test_pickle_round_trip(data, monkeypatch):
     state = som.__getstate__()
     for key in ("memory_fraction", "verbose", "deterministic", "fused", "precision"):  # pickled by 0.2
         del state[key]
-    for key in ("neighbourhood", "grid_metric", "sigma_schedule", "schedule_end"):  # pickled by 0.6.0
+    for key in ("neighbourhood", "grid_metric", "sigma_schedule", "schedule_end"):  # pickled by 0.7.0
         del state[key]
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)

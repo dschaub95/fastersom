@@ -64,7 +64,7 @@ Options:
   how the width decays (`"exponential"`, the default, `"linear"`, `"inverse"`, or the widths of all epochs as a
   sequence) and whether the last epoch uses `sigma_final` (`"last_epoch"`, the default under linear and inverse) or
   the schedule would reach it one epoch later (`"after_last_epoch"`, the default under exponential, which keeps
-  0.6.0's width schedule). Under `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch
+  0.7.0's width schedule). Under `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch
   k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the grid distances.
   FlowSOM's settings are `SOM(10, 10, n_epochs=10, neighbourhood="bubble", grid_metric="chebyshev",
   sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0)`, whose last epoch is a k-means step; the

@@ -414,7 +414,7 @@ class SOM:
         s = t / n_epochs, so that sigma_final would be reached one epoch after the last, as in MiniSom and fastersom's
         exponential default, and the last epoch is wider (with a linear decay to 0, sigma_initial / n_epochs). A single
         epoch uses sigma_initial. Defaults to ``"after_last_epoch"`` under the exponential schedule, which keeps the
-        width schedule of fastersom 0.6.0, and to ``"last_epoch"`` under the others. Keyword only.
+        width schedule of fastersom 0.7.0, and to ``"last_epoch"`` under the others. Keyword only.
 
     Attributes
     ----------
@@ -495,7 +495,7 @@ class SOM:
         state.setdefault("deterministic", False)  # pickled before 0.3.2
         state.setdefault("fused", True)  # pickled by 0.3.2 and before
         state.setdefault("precision", "float32")  # pickled by 0.4.0 and before
-        state.setdefault("neighbourhood", "gaussian")  # pickled by 0.6.0 and before
+        state.setdefault("neighbourhood", "gaussian")  # pickled by 0.7.0 and before
         state.setdefault("grid_metric", "euclidean")
         state.setdefault("sigma_schedule", "exponential")
         state.setdefault("schedule_end", None)
