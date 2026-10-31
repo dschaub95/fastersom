@@ -573,7 +573,7 @@ class SOM:
             kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
         return next((k for k in kernels if _works(self._device, k, n_features, self.metric, top2)), None)
 
-    def _batch_size_for(self, data: torch.Tensor, kernel: str | None) -> int:
+    def _batch_size_for(self, n_features: int, kernel: str | None) -> int:
         """kernel: the fused kernel of the BMU search, if any, which holds no scores."""
         if self.batch_size is not None:
             return self.batch_size
@@ -583,7 +583,7 @@ class SOM:
         elif self._device.type == "mps" and hasattr(torch.mps, "recommended_max_memory"):  # torch >= 2.5
             free, fraction = torch.mps.recommended_max_memory() - torch.mps.current_allocated_memory(), 0.5
         elif self._device.type == "cpu":
-            largest = max(self.n_rows * self.n_cols, data.shape[1])
+            largest = max(self.n_rows * self.n_cols, n_features)
             if sys.platform == "darwin":
                 # a few operations per batch dominate below about 2^24 scores (64 MB), the matrix product above (on an
                 # M3 Max at 34 features, an epoch half as long at 10 x 10 nodes as at 8192 rows); many features cap the
@@ -602,7 +602,6 @@ class SOM:
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
-        n_features = data.shape[1]
         if kernel is not None:
             # no scores in memory, only up to about 4 copies of the batch (transposed or as two TF32 parts, centred,
             # with the samples without a BMU zeroed, their BMUs' weights), the TF32 parts' features padded to a
@@ -619,6 +618,10 @@ class SOM:
         n_nodes = self.n_rows * self.n_cols
         # BMU search holds at most about 2 floats per sample and node, plus copies of the batch
         return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + n_features))))
+
+    def _batches(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, ...]:
+        """The samples in consecutive batches of batch_size, the last one smaller if need be."""
+        return data.split(batch_size)
 
     def _check_fitted(self) -> None:
         if not hasattr(self, "weights_"):
@@ -695,7 +698,7 @@ class SOM:
 
         Under cosine and correlation, the samples are scaled to unit length (and centred for correlation).
         """
-        for batch in data.split(batch_size):
+        for batch in self._batches(data, batch_size):
             keep = self._has_bmu(batch)
             if keep is not None:  # cosine, correlation
                 batch = self._centre(batch[keep])
@@ -842,7 +845,7 @@ class SOM:
         kernel = self._kernel(data.shape[1])
         search = self._search(weights, kernel)
         nodes = self._operands(weights)[0] if return_distance and self.metric in ("cosine", "correlation") else None
-        for batch in data.split(self._batch_size_for(data, kernel)):
+        for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel)):
             bmu = search(batch)
             bmus.append(bmu)
             if not return_distance:
@@ -1011,10 +1014,10 @@ class SOM:
         index_add_: on the CPU, index_add_ spreads over the threads only for many rows, and adding batch by batch takes
         several times as long. A part is at least one batch, whose copies the BMU search makes anyway.
         """
-        sums = data.new_zeros((n_nodes, data.shape[1]))
-        counts = torch.zeros(n_nodes, dtype=torch.long, device=data.device)
+        sums = torch.zeros((n_nodes, data.shape[1]), dtype=torch.float32, device=self._device)
+        counts = torch.zeros(n_nodes, dtype=torch.long, device=self._device)
         rows = max(batch_size, min(_CPU_SUM_ROWS, _CPU_SUM_VALUES // data.shape[1]))
-        for part in data.split(rows):
+        for part in self._batches(data, rows):
             bmus = torch.cat([search(batch) for batch in part.split(batch_size)])
             keep = self._has_bmu(part)
             if keep is not None:
@@ -1067,7 +1070,7 @@ class SOM:
         # second word adds the rounding remainders, exact in float64, scaled by 2^(62 - log2(n_samples)), so that values
         # are lost only below about n_samples^2 * 2^-124 of the largest
         fixed_point = deterministic and (not mps or kernel in _METAL)
-        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data, kernel)
+        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data.shape[1], kernel)
         if fixed_point:
             assert magnitude is not None
             low_shift = 62 - len(data).bit_length()  # remainders within +-0.5, so their sums below 2^61
@@ -1078,7 +1081,7 @@ class SOM:
                 split = exponent // 2
                 factors = [torch.ldexp(torch.ones(len(split)), e).to(self._device) for e in (split, exponent - split)]
             else:
-                scale = data.new_ones(data.shape[1], dtype=torch.float64).ldexp_(low_shift - exponent)
+                scale = torch.ones(data.shape[1], dtype=torch.float64, device=self._device).ldexp_(low_shift - exponent)
                 fixed_rows = max(1, (1 << 21) // data.shape[1])
         # copying a neighbourhood's weights to the device waits for the GPU, so the updates of all epochs are built
         # before the first is queued, unless their weights take more than 2^24 floats
@@ -1094,7 +1097,7 @@ class SOM:
                 lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
                 # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
                 counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=weights.device)
-                for batch in data.split(batch_size):
+                for batch in self._batches(data, batch_size):
                     bmus = search(batch)
                     keep = self._has_bmu(batch)
                     if keep is not None:  # samples without a BMU add zeros (dropping them waits for the GPU to count)
@@ -1180,10 +1183,10 @@ class SOM:
         """
         self._check_fitted()
         data = self._check_X(X)
-        batch_size = self._batch_size_for(data, None)
+        batch_size = self._batch_size_for(data.shape[1], None)
         # on the CPU, as it can exceed device memory
         distances = torch.empty(len(data), len(self._weights), dtype=torch.float32, device="cpu")
-        for batch, rows in zip(data.split(batch_size), distances.split(batch_size), strict=True):
+        for batch, rows in zip(self._batches(data, batch_size), distances.split(batch_size), strict=True):
             rows.copy_(self._distances(batch))
         return distances.numpy()
 
@@ -1209,7 +1212,7 @@ class SOM:
             data = data[has_bmu]
         kernel = self._kernel(data.shape[1], top2=True)
         search = self._search(self._weights, kernel, top2=True)
-        nodes = torch.cat([search(batch) for batch in data.split(self._batch_size_for(data, kernel))])
+        nodes = torch.cat([search(batch) for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel))])
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
         return float((offset > 1).cpu().double().mean())
 

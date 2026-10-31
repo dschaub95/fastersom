@@ -1025,7 +1025,7 @@ def test_fused_compile_failure_falls_back(data, fresh, monkeypatch):
     assert "-I/include" not in str(record[0].message)
     assert record[0].filename == __file__  # the caller's line, not fastersom's
     # the batch size is chosen for the torch path, before any batch is searched
-    assert som._batch_size_for(torch.as_tensor(data), som._kernel(6)) <= 2**28 // 36  # the fused one: 2^26 / 6
+    assert som._batch_size_for(data.shape[1], som._kernel(6)) <= 2**28 // 36  # the fused one: 2^26 / 6
     np.testing.assert_array_equal(som.predict(data), expected)  # no second warning
 
 
@@ -1130,5 +1130,5 @@ def test_cpu_batch_size_by_nodes_and_features(monkeypatch, platform, expected):
     for (n_rows, n_cols), n_features in (((10, 10), 34), ((10, 10), 2000), ((100, 100), 34), ((200, 200), 34)):
         som = SOM(n_rows, n_cols, device=CPU)
         som._setup()
-        sizes.append(som._batch_size_for(torch.zeros(4, n_features), None))
+        sizes.append(som._batch_size_for(n_features, None))
     assert tuple(sizes) == expected
