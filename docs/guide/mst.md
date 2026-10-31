@@ -1,8 +1,8 @@
 # Minimum spanning trees
 
-{func}`~fastersom.minimum_spanning_tree` computes the minimum spanning tree (MST) of the rows of an array, such as the
-nodes of a fitted map or k-means centroids: the tree of `n - 1` edges that connects all `n` rows at the least total
-distance. Such trees of SOM nodes serve, for example, to lay out and to cluster the nodes in the FlowSOM workflow
+{func}`~fastersom.minimum_spanning_tree` computes the minimum spanning tree (MST) of the rows of an array, the nodes of
+a fitted map or any other points: the tree of `n - 1` edges that connects all `n` rows at the least total distance.
+Such trees of SOM nodes serve, for example, to lay out and to cluster the nodes in the FlowSOM workflow
 {cite:p}`Van_Gassen_2015`. {meth}`SOM.minimum_spanning_tree <fastersom.SOM.minimum_spanning_tree>` takes the tree of
 a fitted map's nodes, in its metric and on its device.
 
@@ -14,7 +14,7 @@ tree = som.minimum_spanning_tree()
 tree.edges  # node pairs, shape (899, 2), sorted by distance
 tree.weights  # their distances in the map's metric
 
-tree = minimum_spanning_tree(centroids, metric="cosine")
+tree = minimum_spanning_tree(points, metric="cosine")  # any array of shape (n_points, n_features)
 ```
 
 ## Algorithm and memory

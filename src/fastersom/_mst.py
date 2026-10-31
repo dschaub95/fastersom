@@ -332,7 +332,7 @@ def minimum_spanning_tree(
     batch_size: int | None = None,
     memory_fraction: float | None = None,
 ) -> "SpanningTree":
-    """Minimum spanning tree of the rows of X, such as a map's nodes or k-means centroids.
+    """Minimum spanning tree of the rows of X: a map's nodes or any other points.
 
     Borůvka's algorithm with a masked nearest-point search per round, in O(n_points) memory beyond one block of
     batch_size x n_points scores (no n_points x n_points matrix) and at most ceil(log2 n_points) rounds of

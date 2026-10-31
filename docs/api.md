@@ -37,9 +37,8 @@ Quality measures
 
 Minimum spanning trees
 : {meth}`~fastersom.SOM.minimum_spanning_tree` (of the nodes) and {func}`~fastersom.minimum_spanning_tree` (of any
-  points, such as centroids), returning a
-  {class}`~fastersom.SpanningTree` with the edges and their distances, degrees, path lengths, single-linkage clusters
-  and the linkage matrix. See [](guide/mst.md).
+  points), returning a {class}`~fastersom.SpanningTree` with the edges and their distances, degrees, path lengths,
+  single-linkage clusters and the linkage matrix. See [](guide/mst.md).
 
 Fitted attributes
 : `weights_` (node weights, shape `(n_rows * n_cols, n_features)`, node = `row * n_cols + col`), `labels_` (BMU of

@@ -2,18 +2,18 @@
 
 ## Unreleased
 
-- `fastersom.minimum_spanning_tree(X, metric)` and `SOM.minimum_spanning_tree()`: the minimum spanning tree of points
-  (such as centroids) or a map's nodes, by Borůvka's algorithm with a masked nearest-point search per round on the torch
-  path, in memory for the points and one block of batch x points scores (no n x n matrix). With `exact=True` (the
-  default), rows whose two best scores are not separated by more than a rigorous bound of the rounding error are
-  searched again in float64, which makes the tree the unique minimum spanning tree of the float64 distances under the
-  order (distance, lower index, higher index), independent of the device, batch size and thread count; it matches
-  scipy's tree of the dense distance matrix on the test inputs. Identical points are joined by edges of distance 0.
-  Euclidean, manhattan, cosine and correlation (as the euclidean tree of the rows scaled to unit length, and centred).
-  On an M3 Max CPU (8 threads) 0.45 s for 10,000 points and 5.3 s for 40,000 points of 34 features, with about 0.3 GB
-  beyond the points. The result, a `SpanningTree`, holds the edges and their distances and gives degrees, leaves, hop
-  counts and path lengths, single-linkage clusters (`labels`), a scipy linkage matrix and a scipy sparse matrix, each in
-  memory linear in the number of nodes beyond the output.
+- `fastersom.minimum_spanning_tree(X, metric)` and `SOM.minimum_spanning_tree()`: the minimum spanning tree of a map's
+  nodes or of any points, by Borůvka's algorithm with a masked nearest-point search per round on the torch path, in
+  memory for the points and one block of batch x points scores (no n x n matrix). With `exact=True` (the default), rows
+  whose two best scores are not separated by more than a rigorous bound of the rounding error are searched again in
+  float64, which makes the tree the unique minimum spanning tree of the float64 distances under the order (distance,
+  lower index, higher index), independent of the device, batch size and thread count; it matches scipy's tree of the
+  dense distance matrix on the test inputs. Identical points are joined by edges of distance 0. Euclidean, manhattan,
+  cosine and correlation (as the euclidean tree of the rows scaled to unit length, and centred). On an M3 Max CPU (8
+  threads) 0.45 s for 10,000 points and 5.3 s for 40,000 points of 34 features, with about 0.3 GB beyond the points. The
+  result, a `SpanningTree`, holds the edges and their distances and gives degrees, leaves, hop counts and path lengths,
+  single-linkage clusters (`labels`), a scipy linkage matrix and a scipy sparse matrix, each in memory linear in the
+  number of nodes beyond the output.
 
 ## 0.7.0 (2026-10-29)
 
