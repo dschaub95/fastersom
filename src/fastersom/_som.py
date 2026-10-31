@@ -28,6 +28,7 @@ import sys
 import sysconfig
 import warnings
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from functools import cache
 from math import ceil, floor, isfinite, prod
@@ -69,6 +70,9 @@ _PRECISIONS = ("float32", "float16")
 # part is copied by the selection of the samples with a BMU, 64 MB per copy at most unless a batch is larger
 _CPU_SUM_ROWS = 1 << 20
 _CPU_SUM_VALUES = 1 << 24
+# float32 values per pinned host buffer (64 MB, two of them) through which stream=True copies batches to CUDA; a larger
+# batch arrives in several copies
+_PINNED_VALUES = 1 << 24
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
 # with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
@@ -326,12 +330,73 @@ class _Stream:
         # torch takes no read-only arrays, such as the slices of a memmap opened with mode="r"
         return torch.from_numpy(rows if rows.flags.writeable and rows.flags.c_contiguous else rows.copy())
 
+    def _fill(self, buffer: torch.Tensor, start: int, stop: int) -> None:
+        """Reads rows start to stop (all within X) into the first rows of a float32 buffer on the CPU."""
+        rows = self.X[start:stop]
+        if isinstance(rows, torch.Tensor):
+            buffer[: stop - start].copy_(rows)
+        else:  # converted while copied, as torch.as_tensor(X, dtype=torch.float32) does
+            np.copyto(buffer[: stop - start].numpy(), rows, casting="unsafe")
+
+    def _pipelined(self, batch_size: int) -> Iterator[torch.Tensor]:
+        """The batches on CUDA, read by a thread into two pinned buffers in turn and copied on a side stream.
+
+        While the caller's stream searches a batch, the thread reads the next rows and the side stream copies the rows
+        before, both overlapping the search. A batch beyond a buffer's _PINNED_VALUES arrives in several copies. A
+        buffer is refilled only once its last copy has finished, and the batches are allocated on the side stream and
+        recorded on the caller's, so that their memory is not reused while the search still reads them.
+        """
+        n_samples, n_features = self.shape
+        rows = min(batch_size, n_samples, max(1, _PINNED_VALUES // n_features))
+
+        def ranges() -> Iterator[tuple[int, int, int, int]]:  # first row of the batch, rows start to stop, its end
+            for begin in range(0, n_samples, batch_size):
+                end = min(begin + batch_size, n_samples)
+                for start in range(begin, end, rows):
+                    yield begin, start, min(start + rows, end), end
+
+        current, side = torch.cuda.current_stream(self.device), torch.cuda.Stream(self.device)
+        buffers = [torch.empty((rows, n_features), pin_memory=True) for _ in range(2)]
+        copied = [torch.cuda.Event(), torch.cuda.Event()]  # recorded after each copy out of the buffer
+
+        def fill(k: int, start: int, stop: int) -> None:
+            copied[k % 2].synchronize()  # the buffer's previous copy, of part k - 2, has finished
+            self._fill(buffers[k % 2], start, stop)
+
+        parts = ranges()
+        k, part = 0, next(parts)
+        with ThreadPoolExecutor(1) as reader:
+            pending = reader.submit(fill, 0, part[1], part[2])
+            while True:
+                begin, start, stop, end = part
+                pending.result()
+                following = next(parts, None)
+                if following is not None:
+                    pending = reader.submit(fill, k + 1, following[1], following[2])
+                with torch.cuda.stream(side):
+                    if start == begin:
+                        batch = torch.empty((end - begin, n_features), device=self.device)
+                    batch[start - begin : stop - begin].copy_(buffers[k % 2][: stop - start], non_blocking=True)
+                    copied[k % 2].record(side)
+                if stop == end:
+                    current.wait_stream(side)
+                    batch.record_stream(current)
+                    yield batch
+                if following is None:
+                    return
+                k, part = k + 1, following
+
     def batches(self, batch_size: int) -> Iterator[torch.Tensor]:
         """The samples in consecutive batches of batch_size on the device, in order."""
         first = self.extremes is None
         extremes = None
-        for start in range(0, len(self), batch_size):
-            batch = self._read(start, start + batch_size).to(self.device)
+        if self.device.type == "cuda":
+            copies = self._pipelined(batch_size)
+        else:  # on MPS, whose memory the CPU shares, a plain copy; on the CPU none
+            copies = (
+                self._read(start, start + batch_size).to(self.device) for start in range(0, len(self), batch_size)
+            )
+        for batch in copies:
             if first:
                 low, high = batch.amin(0), batch.amax(0)
                 extremes = (low, high) if extremes is None else (extremes[0].minimum(low), extremes[1].maximum(high))
@@ -703,6 +768,8 @@ class SOM:
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
+        # stream=True holds the next batch, and the last one until the search has read it, besides the searched one
+        copies = 8 * n_features if self.stream else 0
         if kernel is not None:
             # no scores in memory, only up to about 4 copies of the batch (transposed or as two TF32 parts, centred,
             # with the samples without a BMU zeroed, their BMUs' weights), the TF32 parts' features padded to a
@@ -715,10 +782,10 @@ class SOM:
                 per_sample = 4 * (4 * n_features + _module(self._device, kernel).sample_width(n_features)) + 32
             else:
                 per_sample = 16 * n_features + 32
-            return max(1, min((1 << 26) // n_features, int(fraction * free) // per_sample))
+            return max(1, min((1 << 26) // n_features, int(fraction * free) // (per_sample + copies)))
         n_nodes = self.n_rows * self.n_cols
         # BMU search holds at most about 2 floats per sample and node, plus copies of the batch
-        return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + n_features))))
+        return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + n_features) + copies)))
 
     def _batches(self, data: torch.Tensor | _Stream, batch_size: int) -> Iterable[torch.Tensor]:
         """The samples in consecutive batches of batch_size, the last one smaller if need be, read when streamed."""

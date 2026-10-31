@@ -1244,6 +1244,26 @@ def test_stream_predict_input_validation(data, tmp_path):
             method(data[:, :3])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_stream_cuda_copies(data, tmp_path, monkeypatch):
+    # through pinned buffers smaller than a batch, so that batches arrive in several copies, the last one shorter
+    from fastersom import _som
+
+    monkeypatch.setattr(_som, "_PINNED_VALUES", 1000)  # 166 rows of 6 features
+    kwargs = {**STREAM_KWARGS, "device": "cuda", "deterministic": True}
+    som = SOM(**kwargs).fit(data)
+    path = tmp_path / "X.npy"
+    np.save(path, data.astype(np.float64))
+    for X in (np.load(path, mmap_mode="r"), torch.from_numpy(data), Rows(data)):
+        streamed = SOM(**kwargs, stream=True).fit(X)
+        np.testing.assert_array_equal(streamed.weights_, som.weights_)
+        np.testing.assert_array_equal(streamed.predict(X), som.labels_)
+    bad = data.copy()
+    bad[4321, 2] = np.nan
+    with pytest.raises(ValueError, match="NaN"):
+        SOM(**kwargs, stream=True).fit(bad)
+
+
 def test_nth_true():
     from fastersom._som import _nth_true
 
