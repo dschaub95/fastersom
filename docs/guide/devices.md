@@ -48,8 +48,9 @@ labels = som.predict(X)
   default depends on the free memory.
 - `fit` does not set `labels_`, which would hold an int64 per sample; `predict(X)` returns them, and `fit_predict`
   calls it. `predict`, `transform` and the error measures read `X` once, and raise for values that are not finite only
-  at the end of that pass. `predict` and the error measures still keep a BMU and a distance per sample on the device,
-  12 bytes per sample.
+  at the end of that pass. `predict` copies each batch's BMUs and distances (12 bytes per sample) to the host as they
+  are found, on CUDA through pinned memory without waiting for each copy, and the error measures sum over each batch,
+  so that the device holds nothing per sample.
 
 The streamed fit is bound by reading the data rather than by the search. On an A100, a 32 x 32 map on 20 million
 samples x 50 features (4 GB) in float32, from a memmap in the page cache, took 0.33 s per epoch, about 12 GB/s, against

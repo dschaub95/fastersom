@@ -1264,6 +1264,23 @@ def test_stream_cuda_copies(data, tmp_path, monkeypatch):
         SOM(**kwargs, stream=True).fit(bad)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+def test_stream_results_off_the_device(data, metric):
+    # streamed, the per-sample results go to the host batch by batch: the peak device memory does not grow with X
+    som = SOM(**STREAM_KWARGS, metric=metric, device="cuda", stream=True).fit(data)
+    for method in (lambda X: som.predict(X, return_distance=True), som.quantization_error, som.topographic_error):
+        peaks = []
+        for X in (data, np.tile(data, (80, 1))):  # 400000 samples, 4.8 MB of BMUs and distances
+            method(X)  # once before, for the memory kept between calls, such as cuBLAS's workspace
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            method(X)
+            peaks.append(torch.cuda.max_memory_allocated() - before)
+        assert peaks[1] <= 2 * peaks[0] < 1 << 20
+
+
 def test_nth_true():
     from fastersom._som import _nth_true
 
