@@ -243,12 +243,7 @@ def _grid_distance(dr: np.ndarray, dc: np.ndarray, grid_metric: str) -> np.ndarr
 
 
 def _neighbourhood(d: np.ndarray, sigma: float, neighbourhood: str) -> np.ndarray:
-    """The neighbourhood function h(d; sigma) in float64, [d == 0] at sigma 0 (the limit of every function).
-
-    fit never asks for widths below _IDENTITY_SIGMA, where H is the identity; sigma 0 is defined for completeness.
-    """
-    if sigma == 0:
-        return (d == 0).astype(np.float64)
+    """The neighbourhood function h(d; sigma) in float64, for sigma >= _IDENTITY_SIGMA (below, H is the identity)."""
     q = np.square(d / sigma)
     if neighbourhood == "gaussian":
         return np.exp(-0.5 * q)
