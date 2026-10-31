@@ -1488,16 +1488,33 @@ class SOM:
             nodes = torch.cat([search(batch) for batch in self._batches(data, batch_size)])
             offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
             return float((offset > 1).cpu().double().mean())
-        # streamed, counted per batch without waiting for the GPU; the samples without a BMU are dropped after the
-        # search, which takes no empty batches
-        errors = count = torch.zeros((), dtype=torch.int64, device=self._device)
-        for batch in self._batches(data, batch_size):
+        # streamed, counted per batch on the device
+        errors, count = torch.zeros((), dtype=torch.int64, device=self._device), 0
+        for batch in self._kept_batches(data, batch_size):
             nodes = search(batch)
-            error = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1) > 1
+            errors += ((self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1) > 1).sum()
+            count += len(batch)
+        return float(errors.cpu().double() / count)
+
+    def _kept_batches(self, data: _Stream, batch_size: int) -> Iterator[torch.Tensor]:
+        """The streamed samples with a BMU in batches of batch_size, those of data[has_bmu].split(batch_size).
+
+        So that the search sees the batches it sees in memory. Under cosine and correlation each batch's mask waits
+        for the GPU, as the number of samples kept decides the batches, and the samples left over wait for the next.
+        """
+        rest = None
+        for batch in data.batches(batch_size):
             keep = self._has_bmu(batch)
-            errors = errors + (error if keep is None else error & keep).sum()
-            count = count + (len(batch) if keep is None else keep.sum())
-        return float(errors.cpu().double() / count.cpu())
+            if keep is None:  # all samples have a BMU
+                yield batch
+                continue
+            kept = batch[keep] if rest is None else torch.cat([rest, batch[keep]])
+            if len(kept) >= batch_size:
+                yield kept[:batch_size]
+                kept = kept[batch_size:]
+            rest = kept
+        if rest is not None and len(rest):
+            yield rest
 
     def distance_map(self) -> np.ndarray:
         """Returns the U-matrix, shape (n_rows, n_cols).

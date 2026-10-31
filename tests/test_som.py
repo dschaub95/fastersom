@@ -1226,8 +1226,25 @@ def test_stream_predict_transform_and_errors(data, device, metric):
     np.testing.assert_array_equal(streamed.fit_predict(X), som.labels_)
     np.testing.assert_array_equal(streamed.transform(X), som.transform(X))
     assert streamed.quantization_error(X) == som.quantization_error(X)
-    # streamed, the search also sees the samples without a BMU, whose results it drops
-    assert streamed.topographic_error(X) == pytest.approx(som.topographic_error(X), abs=1e-3)
+    # streamed, the samples with a BMU are regrouped into the batches of the search in memory
+    assert streamed.topographic_error(X) == som.topographic_error(X)
+
+
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("metric", METRICS)
+def test_stream_kept_batches(data, device, metric):
+    # the batches of data[has_bmu].split(batch_size), also across batches without any sample with a BMU
+    X = data.copy()
+    X[::7] = 0
+    X[600:1700] = 0
+    som = SOM(**STREAM_KWARGS, metric=metric, device=device).fit(data)
+    streamed = SOM.from_weights(som.weights_, 6, 5, metric=metric, device=device, stream=True)
+    has_bmu = som._has_bmu(torch.as_tensor(X))
+    kept = torch.as_tensor(X) if has_bmu is None else torch.as_tensor(X)[has_bmu]
+    batches = [batch.cpu() for batch in streamed._kept_batches(streamed._check_X(X), 512)]
+    assert [len(batch) for batch in batches] == [len(batch) for batch in kept.split(512)]
+    np.testing.assert_array_equal(torch.cat(batches).numpy(), kept.numpy())
+    assert streamed.topographic_error(X) == som.topographic_error(X)
 
 
 def test_stream_predict_input_validation(data, tmp_path):
