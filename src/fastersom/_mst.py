@@ -388,10 +388,7 @@ def minimum_spanning_tree(
     # identical rows: the tree joins each to the first of its kind by an edge of weight 0 (as the strict order does),
     # and the first rows, whose order is that of the rows, by the tree of the distinct rows
     _, first, inverse = np.unique(Q.numpy(), axis=0, return_index=True, return_inverse=True)
-    distinct = np.sort(first)
-    rank = np.empty(len(first), np.int64)
-    rank[np.argsort(first)] = np.arange(len(first))
-    representative = distinct[rank[inverse.ravel()]]
+    distinct, representative = np.sort(first), first[inverse.ravel()]
     edges, squared = np.zeros((0, 2), np.int64), np.zeros(0)
     if len(distinct) > 1:
         engine.n_rows = len(distinct)
