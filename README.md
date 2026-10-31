@@ -86,12 +86,12 @@ Options:
   search and takes the torch path instead, without compiling anything. It only matters on CUDA and MPS.
 - `precision="float16"` lets `fit`'s BMU search round samples and nodes to 11 significant bits, summing the products in
   float32, as half inputs to the [Metal kernels](#fused-metal-kernels) on MPS, scaled by powers of 2 into half's range.
-  It applies under euclidean, cosine and correlation from 16 features; elsewhere, and on CUDA, the search stays float32,
-  as do `labels_`, `predict`, `transform` and the error measures. The BMUs of near-tied samples flip, more on larger
-  maps (of clustered 0-1 pixels about 1% at 10 x 10 nodes and 10-35% from 30 x 30), which gives an equally good map
-  rather than the same one: in our tests the same quantization error, but a topographic error up to 1.4x higher on
-  synthetic clusters. It is meant for GPUs whose half products are much faster than float32 ones, such as the M5's,
-  where it is untested; on an M3 Max `fit` is only 1.00-1.05x faster.
+  It applies under euclidean, cosine and correlation from 16 features, except with `neighbourhood="mexican_hat"`;
+  elsewhere, and on CUDA, the search stays float32, as do `labels_`, `predict`, `transform` and the error measures. The
+  BMUs of near-tied samples flip, more on larger maps (of clustered 0-1 pixels about 1% at 10 x 10 nodes and 10-35% from
+  30 x 30), which gives an equally good map rather than the same one: in our tests the same quantization error, but a
+  topographic error up to 1.4x higher on synthetic clusters. It is meant for GPUs whose half products are much faster
+  than float32 ones, such as the M5's, where it is untested; on an M3 Max `fit` is only 1.00-1.05x faster.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.

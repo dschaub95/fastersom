@@ -377,17 +377,17 @@ class SOM:
         Whether the BMU search on CUDA and MPS may use the fused kernels. With False, it never compiles or
         launches them and takes the torch path, as on the CPU.
     precision
-        ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11
-        significant bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS,
-        scaled by powers of 2 per feature into half's range (samples and initial weights within 2^-30 to 2^30).
-        Only under euclidean, cosine and correlation from 16 features with the Metal kernels, else float32 (as on
-        CUDA); ``labels_``, predict, transform and the error measures stay float32. The BMUs of near-tied samples
-        flip, more of them on larger maps and depending on the data (on clustered 0-1 pixels of 34 features about
-        1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the rounding error (the squared distance to the
-        node found 0.6% above the best on average), which gives an equally good map rather than the same one: the
-        same quantization error, and a topographic error up to 1.4x higher on synthetic clusters. On an M3 Max fit
-        is only 1.00-1.05x faster, as its half products are no faster than float32 ones; M5 GPUs may gain more,
-        which is untested.
+        ``"float32"`` or ``"float16"``, with which fit's BMU search may round the samples and nodes to 11 significant
+        bits for speed, summing the products in float32, as half inputs to the Metal kernels on MPS, scaled by powers of
+        2 per feature into half's range (samples and initial weights within 2^-30 to 2^30). Only under euclidean, cosine
+        and correlation from 16 features with the Metal kernels and a neighbourhood other than the mexican hat (which
+        can move nodes out of that range), else float32 (as on CUDA); ``labels_``, predict, transform and the error
+        measures stay float32. The BMUs of near-tied samples flip, more of them on larger maps and depending on the data
+        (on clustered 0-1 pixels of 34 features about 1% at 10 x 10 nodes and 10-35% from 30 x 30), each within the
+        rounding error (the squared distance to the node found 0.6% above the best on average), which gives an equally
+        good map rather than the same one: the same quantization error, and a topographic error up to 1.4x higher on
+        synthetic clusters. On an M3 Max fit is only 1.00-1.05x faster, as its half products are no faster than float32
+        ones; M5 GPUs may gain more, which is untested.
     neighbourhood
         Neighbourhood function h(d; sigma) of the grid distance d: ``"gaussian"`` exp(-d^2 / (2 sigma^2)),
         ``"bubble"`` 1 for d <= sigma (inclusive, as FlowSOM and the SOM Toolbox) else 0, ``"triangle"``
@@ -1050,14 +1050,14 @@ class SOM:
         deterministic = self._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
-        magnitude, half = None, self.precision == "float16"
+        # not under the mexican hat, whose negative weights can move the nodes beyond the range checked below
+        magnitude, half = None, self.precision == "float16" and self.neighbourhood != "mexican_hat"
         metal = _metal(self._device) if half else None  # only then, as fused=False must not compile the kernels
         if deterministic or (half and metal is not None):  # the Metal half kernels' scales need it
             magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
         if half and metal is not None:
             assert magnitude is not None
-            # the nodes stay among the samples and the initial weights (except under the mexican hat, whose negative
-            # weights can move them beyond), so these bound all that the half kernels scale
+            # the nodes stay among the samples and the initial weights, so these bound all that the half kernels scale
             half = metal.in_half_range(torch.maximum(magnitude, weights.abs().amax(0)))
         kernel = self._kernel(data.shape[1], half=half)
         mps = self._device.type == "mps"

@@ -42,11 +42,13 @@ the fused kernels and of the torch path differ only on near-ties.
 ### `precision="float16"`
 
 `precision="float16"` lets the BMU search of `fit` round samples and nodes to float16's 11 significant bits, summing
-the products in float32. In fastersom 0.5.0 it applies only:
+the products in float32. It applies only:
 
 - on MPS with the fused Metal kernels,
 - under the euclidean, cosine and correlation metrics,
-- from 16 features, and
+- from 16 features,
+- under any neighbourhood but the mexican hat, whose negative weights can move the nodes beyond the samples and the
+  initial weights, and
 - when the samples and the initial weights are within $2^{-30}$ to $2^{30}$ in magnitude, as the values are scaled by
   powers of 2 per feature into float16's range.
 

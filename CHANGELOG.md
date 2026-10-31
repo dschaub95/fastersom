@@ -26,6 +26,8 @@
     combinations take one Toeplitz matrix product per grid offset at which the neighbourhood is not zero, up to
     n_nodes^2 x n_features multiply-adds per epoch, holding max(n_rows, n_cols)^2 floats at a time (on an M3 Max with
     35 features at most 0.11 s per epoch at 300 x 300 nodes).
+  - `precision="float16"` keeps the search in float32 under the mexican hat, whose negative weights can move the
+    nodes beyond the range of the samples and initial weights that half's scaling is checked against.
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
 
