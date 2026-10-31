@@ -27,10 +27,10 @@ import subprocess
 import sys
 import sysconfig
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import suppress
 from functools import cache
-from math import ceil, floor, isfinite
+from math import ceil, floor, isfinite, prod
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal, cast, overload
@@ -286,6 +286,67 @@ def _synchronize(device: torch.device) -> None:
         torch.mps.synchronize()
 
 
+def _nth_true(mask: np.ndarray, ranks: np.ndarray) -> np.ndarray:
+    """np.flatnonzero(mask)[ranks], in blocks of 2^20 values, without the positions of all True values at once."""
+    block = 1 << 20
+    starts = np.arange(0, len(mask), block)
+    ends = np.add.reduceat(mask, starts, dtype=np.int64).cumsum()  # True values up to the end of each block
+    blocks = np.searchsorted(ends, ranks, side="right")
+    positions = np.empty(len(ranks), dtype=np.int64)
+    for b in np.unique(blocks).tolist():
+        here = blocks == b
+        before = ends[b - 1] if b else 0
+        positions[here] = starts[b] + np.flatnonzero(mask[starts[b] : starts[b] + block])[ranks[here] - before]
+    return positions
+
+
+class _Stream:
+    """Samples kept on the host and read in batches of rows, as float32 tensors on the device (SOM(stream=True)).
+
+    X is anything with a shape (n_samples, n_features) whose row slices are numpy arrays or tensors, such as a numpy
+    memmap, an h5py or zarr dataset or a CPU tensor. The first full pass over the batches finds the per-feature minimum
+    and maximum, extremes, and raises at its end if a sample is not finite. has_bmu: which samples have a BMU, if fit
+    noted them (for init="sample" under cosine and correlation).
+    """
+
+    def __init__(self, X: Any, device: torch.device):
+        self.X, self.shape, self.device = X, tuple(X.shape), device
+        self.extremes: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.has_bmu: np.ndarray | None = None
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def _read(self, start: int, stop: int) -> torch.Tensor:
+        """Rows start to stop as a float32 tensor on the CPU."""
+        rows = self.X[start:stop]
+        if isinstance(rows, torch.Tensor):
+            return rows.detach().to("cpu", torch.float32).contiguous()
+        rows = np.asarray(rows, dtype=np.float32)
+        # torch takes no read-only arrays, such as the slices of a memmap opened with mode="r"
+        return torch.from_numpy(rows if rows.flags.writeable and rows.flags.c_contiguous else rows.copy())
+
+    def batches(self, batch_size: int) -> Iterator[torch.Tensor]:
+        """The samples in consecutive batches of batch_size on the device, in order."""
+        first = self.extremes is None
+        extremes = None
+        for start in range(0, len(self), batch_size):
+            batch = self._read(start, start + batch_size).to(self.device)
+            if first:
+                low, high = batch.amin(0), batch.amax(0)
+                extremes = (low, high) if extremes is None else (extremes[0].minimum(low), extremes[1].maximum(high))
+            yield batch
+        if first:
+            assert extremes is not None  # X has a sample
+            if not torch.isfinite(torch.stack(extremes)).all():
+                raise ValueError("X contains NaN or infinite values")
+            self.extremes = extremes
+
+    def rows(self, positions: np.ndarray) -> torch.Tensor:
+        """The samples at the given positions on the device, each read as a slice of one row."""
+        return torch.cat([self._read(i, i + 1) for i in positions.tolist()]).to(self.device)
+
+
 class SOM:
     """Batch self-organising map on a rectangular grid, by default with a gaussian neighbourhood.
 
@@ -445,6 +506,7 @@ class SOM:
         grid_metric: str = "euclidean",
         sigma_schedule: str | ArrayLike = "exponential",
         schedule_end: str | None = None,
+        stream: bool = False,
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -465,6 +527,7 @@ class SOM:
         self.grid_metric = grid_metric
         self.sigma_schedule = sigma_schedule
         self.schedule_end = schedule_end
+        self.stream = stream
 
     @classmethod
     def from_weights(cls, weights: ArrayLike | torch.Tensor, n_rows: int, n_cols: int, **kwargs) -> "SOM":
@@ -496,6 +559,7 @@ class SOM:
         state.setdefault("grid_metric", "euclidean")
         state.setdefault("sigma_schedule", "exponential")
         state.setdefault("schedule_end", None)
+        state.setdefault("stream", False)
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -547,6 +611,41 @@ class SOM:
         if not torch.isfinite(torch.stack(torch.aminmax(data))).all():  # unlike isfinite(data), without a copy of X
             raise ValueError("X contains NaN or infinite values")
         return data
+
+    def _source(self, X: Any) -> _Stream:
+        """X for stream=True, kept on the host, with the checks of _check_X (that it is finite in the first pass)."""
+        if not hasattr(X, "shape"):  # e.g. a list, in memory anyway
+            X = np.asarray(X)
+        shape = tuple(X.shape)
+        if len(shape) < 2 or prod(shape) == 0:
+            raise ValueError(f"X must have shape (n_samples, n_features) or (..., n_features), got {shape}")
+        if len(shape) > 2:
+            # only as a view: reshaping anything else could read all of X into memory
+            if not (isinstance(X, np.ndarray) and X.flags.c_contiguous) and not (
+                isinstance(X, torch.Tensor) and X.is_contiguous()
+            ):
+                raise ValueError(
+                    f"with stream=True, X must have shape (n_samples, n_features) or be a C-contiguous numpy array or "
+                    f"tensor, got shape {shape}"
+                )
+            X = X.reshape(-1, shape[-1])
+        if hasattr(self, "n_features_in_") and shape[-1] != self.n_features_in_:
+            raise ValueError(f"X has {shape[-1]} features, but SOM was fitted with {self.n_features_in_}")
+        return _Stream(X, self._device)
+
+    def _scan(self, data: _Stream) -> None:
+        """The first pass over streamed samples, which checks that they are finite and finds their extremes.
+
+        For init="sample" under cosine and correlation it also notes which samples have a BMU, on the host (a byte
+        per sample).
+        """
+        sample = isinstance(self.init, str) and self.init == "sample"
+        masks = []
+        for batch in data.batches(max(1, (1 << 24) // data.shape[1])):
+            keep = self._has_bmu(batch) if sample else None
+            if keep is not None:
+                masks.append(keep.cpu().numpy())
+        data.has_bmu = np.concatenate(masks) if masks else None
 
     def _kernel(self, n_features: int, top2: bool = False, half: bool = False) -> str | None:
         """Choose the fused kernel of the BMU search.
@@ -619,9 +718,9 @@ class SOM:
         # BMU search holds at most about 2 floats per sample and node, plus copies of the batch
         return max(1, min((1 << 28) // n_nodes, int(fraction * free) // (8 * (n_nodes + n_features))))
 
-    def _batches(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, ...]:
-        """The samples in consecutive batches of batch_size, the last one smaller if need be."""
-        return data.split(batch_size)
+    def _batches(self, data: torch.Tensor | _Stream, batch_size: int) -> Iterable[torch.Tensor]:
+        """The samples in consecutive batches of batch_size, the last one smaller if need be, read when streamed."""
+        return data.split(batch_size) if isinstance(data, torch.Tensor) else data.batches(batch_size)
 
     def _check_fitted(self) -> None:
         if not hasattr(self, "weights_"):
@@ -644,7 +743,7 @@ class SOM:
             raise ValueError("init contains NaN or infinite values")
         return weights.reshape(n_nodes, -1).clone()
 
-    def _init_weights(self, data: torch.Tensor) -> torch.Tensor:
+    def _init_weights(self, data: torch.Tensor | _Stream) -> torch.Tensor:
         if not isinstance(self.init, str):
             weights = self._given_weights()
             if weights.shape[1] != data.shape[1]:
@@ -658,14 +757,20 @@ class SOM:
             values = rng.rand(self.n_rows, self.n_cols, data.shape[1]) * 2 - 1
             values /= np.linalg.norm(values, axis=-1, keepdims=True)
             return torch.as_tensor(values.reshape(n_nodes, -1), dtype=torch.float32, device=self._device)
-        has_bmu = self._has_bmu(data)
-        candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
-        if len(candidates) == 0:
+        if isinstance(data, torch.Tensor):
+            has_bmu = self._has_bmu(data)
+            candidates = torch.arange(len(data), device=self._device) if has_bmu is None else has_bmu.nonzero()[:, 0]
+            n_candidates = len(candidates)
+        else:  # streamed, whose samples with a BMU _scan noted
+            n_candidates = len(data) if data.has_bmu is None else int(data.has_bmu.sum())
+        if n_candidates == 0:
             raise ValueError(f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU")
-        picks = rng.choice(len(candidates), n_nodes, replace=len(candidates) < n_nodes)
+        picks = rng.choice(n_candidates, n_nodes, replace=n_candidates < n_nodes)
+        if isinstance(data, _Stream):
+            return data.rows(picks if data.has_bmu is None else _nth_true(data.has_bmu, picks))
         return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
 
-    def _pca_weights(self, data: torch.Tensor) -> torch.Tensor:
+    def _pca_weights(self, data: torch.Tensor | _Stream) -> torch.Tensor:
         """Linear initialisation: the grid in the plane of the first two principal components (see init).
 
         The covariance is that of _scatter; its eigenvectors' signs are fixed so that their largest entry is positive.
@@ -693,7 +798,7 @@ class SOM:
         )
         return grid.reshape(self.n_rows * self.n_cols, n_features).float().to(self._device)
 
-    def _compared_batches(self, data: torch.Tensor, batch_size: int) -> Iterator[torch.Tensor]:
+    def _compared_batches(self, data: torch.Tensor | _Stream, batch_size: int) -> Iterator[torch.Tensor]:
         """The samples with a BMU as the metric compares them, batch by batch, without empty batches.
 
         Under cosine and correlation, the samples are scaled to unit length (and centred for correlation).
@@ -706,7 +811,7 @@ class SOM:
             if len(batch):
                 yield batch
 
-    def _mean(self, data: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, int]:
+    def _mean(self, data: torch.Tensor | _Stream, batch_size: int) -> tuple[torch.Tensor, int]:
         """Mean (float64, on the CPU) and number of the samples with a BMU as the metric compares them.
 
         Each batch is summed in float32 on the device less the first such sample, so that an offset common to the
@@ -724,7 +829,9 @@ class SOM:
             return total, 0
         return first.cpu().double() + total / n_samples, n_samples
 
-    def _scatter(self, data: torch.Tensor, batch_size: int, mean: torch.Tensor, n_samples: int) -> torch.Tensor:
+    def _scatter(
+        self, data: torch.Tensor | _Stream, batch_size: int, mean: torch.Tensor, n_samples: int
+    ) -> torch.Tensor:
         """Sum of squares about the mean of _mean of the samples with a BMU as the metric compares them.
 
         The matrix sum_i (x_i - m)(x_i - m)^T (float64, on the CPU), with mean and n_samples from _mean. It is summed
@@ -1006,7 +1113,11 @@ class SOM:
         return smooth
 
     def _sums_cpu(
-        self, data: torch.Tensor, search: Callable[[torch.Tensor], torch.Tensor], n_nodes: int, batch_size: int
+        self,
+        data: torch.Tensor | _Stream,
+        search: Callable[[torch.Tensor], torch.Tensor],
+        n_nodes: int,
+        batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Sum the samples per node on the CPU, in parts of up to _CPU_SUM_ROWS samples and _CPU_SUM_VALUES values.
 
@@ -1046,7 +1157,9 @@ class SOM:
         self._setup()
         for attr in ("weights_", "labels_", "n_features_in_"):
             self.__dict__.pop(attr, None)
-        data = self._check_X(X)
+        data = self._source(X) if self.stream else self._check_X(X)
+        if isinstance(data, _Stream):
+            self._scan(data)
         weights = self._init_weights(data)
         deterministic = self._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
@@ -1055,7 +1168,11 @@ class SOM:
         magnitude, half = None, self.precision == "float16" and self.neighbourhood != "mexican_hat"
         metal = _metal(self._device) if half else None  # only then, as fused=False must not compile the kernels
         if deterministic or (half and metal is not None):  # the Metal half kernels' scales need it
-            magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
+            if isinstance(data, torch.Tensor):
+                magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
+            else:
+                assert data.extremes is not None  # from _scan
+                magnitude = torch.maximum(data.extremes[1], -data.extremes[0])
         if half and metal is not None:
             assert magnitude is not None
             # the nodes stay among the samples and the initial weights, so these bound all that the half kernels scale
@@ -1128,7 +1245,8 @@ class SOM:
             if self.verbose:  # the epoch's work is only queued on GPUs, so the bar would run ahead without waiting
                 _synchronize(self._device)
         self._set_weights(weights)
-        self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
+        if isinstance(data, torch.Tensor):  # not when streamed, as an int64 per sample can exceed memory too
+            self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
         return self
 
     @overload
@@ -1163,8 +1281,8 @@ class SOM:
         return bmus.cpu().numpy(), distances.cpu().numpy()
 
     def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
-        """Fits the map and returns ``labels_``."""
-        return self.fit(X).labels_
+        """Fits the map and returns ``labels_`` (with stream=True, which sets none, predict(X))."""
+        return self.fit(X).predict(X) if self.stream else self.fit(X).labels_
 
     def _distances(self, batch: torch.Tensor) -> torch.Tensor:
         if self.metric == "euclidean":  # exact, unlike the BMU search, so large offsets do not cancel
