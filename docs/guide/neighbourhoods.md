@@ -132,8 +132,9 @@ MiniSom
   the rows and one along the columns, which none of the functions here is. Its sigma decays end after the last
   iteration and correspond, with `schedule_end="after_last_epoch"`, to `sigma_schedule="inverse"` with
   `sigma_final=sigma_initial / 3` (`asymptotic_decay`, the default) or `sigma_final=1` (`inverse_decay_to_one`), and
-  to `sigma_schedule="linear"` with `sigma_final=1` (`linear_decay_to_one`). MiniSom's batch training mixes the new weights with the old ones by its
-  learning rate, so it matches the batch map only with a learning rate of 1 that does not decay.
+  to `sigma_schedule="linear"` with `sigma_final=1` (`linear_decay_to_one`). MiniSom's batch training mixes the new
+  weights with the old ones by its learning rate, so it matches the batch map only with a learning rate of 1 that does
+  not decay.
 
 XPySom {cite:p}`Mancini_2020`
 : The gaussian and the mexican hat with `std_coeff * sigma` (by default half its `sigma`) as $\sigma$, and the
