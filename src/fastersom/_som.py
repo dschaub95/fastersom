@@ -355,10 +355,10 @@ class SOM:
         (about batch_size x n_nodes floats, batch_size x n_features with the fused kernel) and speed only. Each
         epoch's update is the same up to float summation order, but over several epochs such rounding differences
         (as between devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults
-        on the CPU to 2^22 / max(n_nodes, n_features), from 512 to 65536 (on macOS 2^24 / max(n_nodes,
-        n_features), from 8192 to 65536), and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features
-        with the fused kernel), fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the
-        memory torch recommends; 65536 before torch 2.5).
+        on the CPU to 2^22 / max(n_nodes, n_features), from 512 to 65536, and 8192 beyond 16,384 nodes or features
+        (on macOS 2^24 / max(n_nodes, n_features), from 8192 to 65536), and on GPUs to 2^28 / n_nodes (where speed
+        levels off; 2^26 / n_features with the fused kernel), fewer if that does not fit in memory_fraction of the
+        free GPU memory (on MPS, of the memory torch recommends; 65536 before torch 2.5).
     memory_fraction
         Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
         on CUDA and 0.5 on MPS, whose memory the system and other apps share.
@@ -595,7 +595,12 @@ class SOM:
             # a batch's scores, and its copies, in about 16 MB each: glibc maps blocks above 32 MB afresh on every
             # allocation, whose page faults make an epoch take up to 2-4x as long (on an AMD EPYC 7742 with 8 threads,
             # from 5 x 5 to 100 x 100 nodes and 8 to 4000 features); below 512 rows, rereading the weights for each
-            # batch costs more than the cache saves at many nodes and features (200 x 200 x 64)
+            # batch costs more than the cache saves
+            if 512 * largest > 1 << 23:
+                # beyond 16,384 nodes or features even 512 rows exceed 32 MB, so smaller batches only add overhead
+                # per batch (with 16 threads at 60 features, an epoch 10% shorter at 140 x 140 nodes at 8192 rows
+                # than at 512, 18% at 200 x 200)
+                return 8192
             return min(1 << 16, max(512, (1 << 22) // largest))
         else:
             return 1 << 16

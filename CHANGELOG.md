@@ -3,9 +3,8 @@
 ## Unreleased
 
 - New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
-  "Neighbourhoods and width schedules". The defaults keep 0.6.0's neighbourhood and width schedule; on CUDA and MPS
-  they give bit-for-bit the same maps as 0.6.0, and on the CPU maps differ by float rounding through the new summation
-  order (see below).
+  "Neighbourhoods and width schedules". The defaults keep 0.7.0's neighbourhood and width schedule and give
+  the same maps as 0.7.0, bit for bit wherever a fit is deterministic (on the CPU, and with `deterministic=True`).
   - `neighbourhood`: `"gaussian"` (default), `"bubble"` (1 within the radius, inclusive, as FlowSOM and the SOM
     Toolbox), `"triangle"`, `"epanechnikov"` (the SOM Toolbox's `ep`), `"cut_gaussian"` (its `cutgauss`) or
     `"mexican_hat"`, each a function of the grid distance and the width sigma.
@@ -29,6 +28,9 @@
     35 features at most 0.11 s per epoch at 300 x 300 nodes).
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
+
+## 0.7.0 (2026-10-29)
+
 - `SOM(init="pca")`: linear initialisation as in the SOM Toolbox, a grid in the plane of the first two principal
   components, centred at the mean, with the longer side of the map along the first component and each side spanning one
   standard deviation of its component; under cosine and correlation of the samples as these metrics compare them.
@@ -38,10 +40,11 @@
   batch's scores and its copies stay within about 16 MB each: glibc maps blocks beyond 32 MB afresh on every
   allocation, and an epoch then takes up to 2-4x as long (twice as long at 10 x 10 nodes x 2000 features). On 200,000
   samples x 16 and 64 features on an AMD EPYC 7742 with 8 threads, an epoch takes about as long up to 22 x 22 nodes and
-  a third to a half as long from 32 x 32 to 100 x 100 nodes (71 x 71 x 16: 1.74 to 0.55 s), but at 200 x 200 nodes x
-  64 features about 40% longer (23.7 to 34 s; pass `batch_size=8192` there). On macOS it is 2^24 / max(n_nodes,
-  n_features), from 8192 to 65536: on 200,000 samples x 34 features on an M3 Max, an epoch takes half as long at
-  10 x 10 nodes (25.5 to 12.9 ms) and a quarter less at 22 x 22.
+  a third to a half as long from 32 x 32 to 100 x 100 nodes (71 x 71 x 16: 1.74 to 0.55 s). Beyond 16,384 nodes or
+  features, where even 512 samples exceed 32 MB, it stays 8192: with 16 threads at 60 features, an epoch at 512
+  samples takes 0.3x as long as at 8192 at 120 x 120 nodes, but 1.1x as long at 140 x 140 and 1.2x at 200 x 200. On
+  macOS it is 2^24 / max(n_nodes, n_features), from 8192 to 65536: on 200,000 samples x 34 features on an M3 Max, an
+  epoch takes half as long at 10 x 10 nodes (25.5 to 12.9 ms) and a quarter less at 22 x 22.
 - The BMU search without a fused kernel (always on the CPU, on GPUs where none applies) computes the nodes' operands
   once per search rather than once per batch: on the CPU, 5 epochs at 100 x 100 nodes x 1000 features take 5.2 s
   rather than 11.4 s.
