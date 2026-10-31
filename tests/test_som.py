@@ -335,7 +335,7 @@ def test_sigma_schedules():
                     assert som._sigmas[:1] == (sigma_initial,)[:n_epochs]
                     if end == "last_epoch" and n_epochs > 1:
                         assert som._sigmas[-1] == sigma_final  # exactly, not by formula (7.3 to 1 in 2)
-                # by default the exponential schedule ends after the last epoch (as until 0.6), the others in it
+                # by default the exponential schedule ends after the last epoch (as until 0.7.0), the others in it
                 default = neighbourhood_som(10, 10, sigma_schedule=name, **kwargs)._sigmas
                 end = "after_last_epoch" if name == "exponential" else "last_epoch"
                 assert default == neighbourhood_som(10, 10, sigma_schedule=name, schedule_end=end, **kwargs)._sigmas
