@@ -601,7 +601,9 @@ class SOM:
             X = np.ascontiguousarray(X)
         return torch.as_tensor(X, dtype=torch.float32, device=self._device)
 
-    def _check_X(self, X: ArrayLike | torch.Tensor) -> torch.Tensor:
+    def _check_X(self, X: ArrayLike | torch.Tensor) -> torch.Tensor | _Stream:
+        if self.stream:
+            return self._source(X)
         data = self._as_tensor(X)
         if data.ndim < 2 or data.numel() == 0:
             raise ValueError(f"X must have shape (n_samples, n_features) or (..., n_features), got {tuple(data.shape)}")
@@ -945,16 +947,19 @@ class SOM:
         return scores.div_(self._centre(batch).norm(dim=1, keepdim=True)).add_(1).clamp_(0, 2)
 
     def _bmus(
-        self, data: torch.Tensor, weights: torch.Tensor, return_distance: bool = True
+        self, data: torch.Tensor | _Stream, weights: torch.Tensor, return_distance: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """BMU and, if return_distance, distance to it per sample; -1 and NaN for samples without a BMU."""
-        bmus, distances = [], []
+        bmus, distances, keeps, streamed = [], [], [], isinstance(data, _Stream)
         kernel = self._kernel(data.shape[1])
         search = self._search(weights, kernel)
         nodes = self._operands(weights)[0] if return_distance and self.metric in ("cosine", "correlation") else None
         for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel)):
             bmu = search(batch)
             bmus.append(bmu)
+            keep = self._has_bmu(batch) if streamed else None  # in memory, of all samples at once below
+            if keep is not None:
+                keeps.append(keep)
             if not return_distance:
                 continue
             # from the BMUs' weights, not the search's scores: for euclidean exact, so large offsets do not cancel, and
@@ -969,7 +974,7 @@ class SOM:
                 distances.append(self._score_distances(batch, score)[:, 0])
         bmu = torch.cat(bmus)
         distance = torch.cat(distances) if return_distance else None
-        has_bmu = self._has_bmu(data)
+        has_bmu = self._has_bmu(data) if isinstance(data, torch.Tensor) else torch.cat(keeps) if keeps else None
         if has_bmu is not None:
             bmu[~has_bmu] = -1
             if distance is not None:
@@ -1157,7 +1162,7 @@ class SOM:
         self._setup()
         for attr in ("weights_", "labels_", "n_features_in_"):
             self.__dict__.pop(attr, None)
-        data = self._source(X) if self.stream else self._check_X(X)
+        data = self._check_X(X)
         if isinstance(data, _Stream):
             self._scan(data)
         weights = self._init_weights(data)
@@ -1325,12 +1330,21 @@ class SOM:
         data = self._check_X(X)
         if len(self._weights) < 2:
             return 0.0
-        has_bmu = self._has_bmu(data)
-        if has_bmu is not None:
-            data = data[has_bmu]
+        if isinstance(data, torch.Tensor):
+            has_bmu = self._has_bmu(data)
+            if has_bmu is not None:
+                data = data[has_bmu]
         kernel = self._kernel(data.shape[1], top2=True)
         search = self._search(self._weights, kernel, top2=True)
-        nodes = torch.cat([search(batch) for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel))])
+        found, keeps, streamed = [], [], isinstance(data, _Stream)
+        for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel)):
+            found.append(search(batch))
+            # streamed, the samples without a BMU are dropped after the search, which takes no empty batches, and at
+            # the end, as dropping them waits for the GPU
+            keep = self._has_bmu(batch) if streamed else None
+            if keep is not None:
+                keeps.append(keep)
+        nodes = torch.cat(found)[torch.cat(keeps)] if keeps else torch.cat(found)
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
         return float((offset > 1).cpu().double().mean())
 

@@ -1211,6 +1211,39 @@ def test_stream_pickle(data):
     np.testing.assert_array_equal(som.fit_predict(data), SOM(**STREAM_KWARGS, device=CPU).fit(data).labels_)
 
 
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("metric", METRICS)
+def test_stream_predict_transform_and_errors(data, device, metric):
+    X = data.copy()
+    X[::10] = 0  # without a BMU under cosine and correlation
+    kwargs = {**STREAM_KWARGS, "metric": metric, "device": device, "deterministic": True}
+    som = SOM(**kwargs).fit(X)
+    streamed = SOM(**kwargs, stream=True).fit(X)
+    labels, distances = streamed.predict(X, return_distance=True)
+    np.testing.assert_array_equal(labels, som.labels_)
+    np.testing.assert_array_equal(streamed.predict(X), som.labels_)
+    np.testing.assert_array_equal(distances, som.predict(X, return_distance=True)[1])
+    np.testing.assert_array_equal(streamed.fit_predict(X), som.labels_)
+    np.testing.assert_array_equal(streamed.transform(X), som.transform(X))
+    assert streamed.quantization_error(X) == som.quantization_error(X)
+    # streamed, the search also sees the samples without a BMU, whose results it drops
+    assert streamed.topographic_error(X) == pytest.approx(som.topographic_error(X), abs=1e-3)
+
+
+def test_stream_predict_input_validation(data, tmp_path):
+    som = SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(data)
+    path = tmp_path / "X.npy"
+    np.save(path, data.reshape(50, 100, 6))
+    np.testing.assert_array_equal(som.predict(np.load(path, mmap_mode="r")), som.predict(data))
+    bad = data.copy()
+    bad[4321, 2] = np.nan
+    for method in (som.predict, som.transform, som.quantization_error, som.topographic_error):
+        with pytest.raises(ValueError, match="NaN"):  # at the end of the pass
+            method(bad)
+        with pytest.raises(ValueError, match="features"):
+            method(data[:, :3])
+
+
 def test_nth_true():
     from fastersom._som import _nth_true
 
