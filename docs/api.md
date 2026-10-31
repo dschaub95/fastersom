@@ -1,7 +1,8 @@
 # API
 
-fastersom has one public class, {class}`~fastersom.SOM`, with a scikit-learn-like interface.
-`fastersom.BatchSOM` is an alias of it.
+fastersom has one model class, {class}`~fastersom.SOM`, with a scikit-learn-like interface. `fastersom.BatchSOM` is
+an alias of it. {func}`~fastersom.minimum_spanning_tree` computes the minimum spanning tree of a map's nodes or of any
+points, as a {class}`~fastersom.SpanningTree`.
 
 ```{eval-rst}
 .. module:: fastersom
@@ -11,6 +12,8 @@ fastersom has one public class, {class}`~fastersom.SOM`, with a scikit-learn-lik
     :toctree: generated
 
     SOM
+    minimum_spanning_tree
+    SpanningTree
 ```
 
 ## Overview
@@ -31,6 +34,11 @@ Using a fitted map
 
 Quality measures
 : {meth}`~fastersom.SOM.quantization_error` and {meth}`~fastersom.SOM.topographic_error`.
+
+Minimum spanning trees
+: {meth}`~fastersom.SOM.minimum_spanning_tree` (of the nodes) and {func}`~fastersom.minimum_spanning_tree` (of any
+  points), returning a {class}`~fastersom.SpanningTree` with the edges and their distances, degrees, path lengths,
+  single-linkage clusters and the linkage matrix. See [](guide/mst.md).
 
 Fitted attributes
 : `weights_` (node weights, shape `(n_rows * n_cols, n_features)`, node = `row * n_cols + col`), `labels_` (BMU of
