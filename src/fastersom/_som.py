@@ -907,10 +907,16 @@ class SOM:
         n_epochs, end = self.n_epochs, self._schedule_end()
         span = max(n_epochs - 1, 1) if end == "last_epoch" else n_epochs
         if self.sigma_schedule == "linear":
-            return tuple(sigma0 + (sigma1 - sigma0) * t / span for t in range(n_epochs))
-        if self.sigma_schedule == "inverse":
-            return tuple(sigma0 / (1 + (sigma0 / sigma1 - 1) * t / span) for t in range(n_epochs))
-        return tuple(sigma0 * (sigma1 / sigma0) ** (t / span) for t in range(n_epochs))
+            widths = [sigma0 + (sigma1 - sigma0) * t / span for t in range(n_epochs)]
+        elif self.sigma_schedule == "inverse":
+            widths = [sigma0 / (1 + (sigma0 / sigma1 - 1) * t / span) for t in range(n_epochs)]
+        else:
+            widths = [sigma0 * (sigma1 / sigma0) ** (t / span) for t in range(n_epochs)]
+        if end == "last_epoch" and n_epochs > 1:
+            # exactly, as the formulas can round it below (to 0.9999999999999999 for 7.3 to 1 in 2 epochs), which
+            # would drop the nodes at the distance sigma_final from the bubble and the cut gaussian
+            widths[-1] = sigma1
+        return tuple(widths)
 
     def _schedule_end(self) -> str:
         """schedule_end, validated, with its default: "after_last_epoch" under exponential, else "last_epoch"."""

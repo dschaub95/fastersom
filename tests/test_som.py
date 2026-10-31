@@ -325,7 +325,7 @@ def test_neighbourhood_values():
 
 def test_sigma_schedules():
     for name, schedule in SCHEDULES.items():
-        for sigma_initial, sigma_final in ((5.0, 0.5), (3.0, 1.0), (0.5, 4.0)):
+        for sigma_initial, sigma_final in ((5.0, 0.5), (3.0, 1.0), (0.5, 4.0), (7.3, 1.0)):
             for n_epochs in (0, 1, 2, 10):
                 kwargs = {"n_epochs": n_epochs, "sigma_initial": sigma_initial, "sigma_final": sigma_final}
                 for end, span in (("last_epoch", max(n_epochs - 1, 1)), ("after_last_epoch", n_epochs)):
@@ -334,7 +334,7 @@ def test_sigma_schedules():
                     np.testing.assert_allclose(som._sigmas, expected, rtol=1e-12)
                     assert som._sigmas[:1] == (sigma_initial,)[:n_epochs]
                     if end == "last_epoch" and n_epochs > 1:
-                        assert som._sigmas[-1] == pytest.approx(sigma_final, rel=1e-12)
+                        assert som._sigmas[-1] == sigma_final  # exactly, not by formula (7.3 to 1 in 2)
                 # by default the exponential schedule ends after the last epoch (as until 0.6), the others in it
                 default = neighbourhood_som(10, 10, sigma_schedule=name, **kwargs)._sigmas
                 end = "after_last_epoch" if name == "exponential" else "last_epoch"
