@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
+  "Neighbourhoods and width schedules". The defaults keep 0.7.0's neighbourhood and width schedule and give
+  the same maps as 0.7.0, bit for bit wherever a fit is deterministic (on the CPU, and with `deterministic=True`).
+  - `neighbourhood`: `"gaussian"` (default), `"bubble"` (1 within the radius, inclusive, as FlowSOM and the SOM
+    Toolbox), `"triangle"`, `"epanechnikov"` (the SOM Toolbox's `ep`), `"cut_gaussian"` (its `cutgauss`) or
+    `"mexican_hat"`, each a function of the grid distance and the width sigma.
+  - `grid_metric`: the distance between grid positions, `"euclidean"` (default), `"chebyshev"` (FlowSOM's) or
+    `"manhattan"`.
+  - `sigma_schedule`: `"exponential"` (default), `"linear"`, `"inverse"` (MiniSom's asymptotic decay with
+    `sigma_final=sigma_initial / 3` and `schedule_end="after_last_epoch"`), or the widths of all epochs as a sequence.
+  - `schedule_end`: `"last_epoch"` makes the last epoch use `sigma_final`; `"after_last_epoch"` makes `sigma_final`
+    the width one epoch after the last, as the exponential schedule always has (and still does by default, so that
+    the default maps do not change). The linear and inverse schedules end in the last epoch by default: a linear
+    decay to 0 over 10 epochs would otherwise end at a tenth of the initial width, 2.9 units on 50 x 50 nodes with
+    FlowSOM's initial radius.
+  - `sigma_final=0` is allowed under the linear schedule and any width of 0 leaves only the winner, which makes the
+    epoch a batch k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the
+    grid distances between all pairs of nodes. FlowSOM's settings are `neighbourhood="bubble",
+    grid_metric="chebyshev", sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0`, whose last epoch is a
+    k-means step.
+  - The gaussian under euclidean and the bubble under chebyshev factor into the grid axes as before; the other
+    combinations take one Toeplitz matrix product per grid offset at which the neighbourhood is not zero, up to
+    n_nodes^2 x n_features multiply-adds per epoch, holding max(n_rows, n_cols)^2 floats at a time (on an M3 Max with
+    35 features at most 0.11 s per epoch at 300 x 300 nodes).
+  - `precision="float16"` keeps the search in float32 under the mexican hat, whose negative weights can move the
+    nodes beyond the range of the samples and initial weights that half's scaling is checked against.
+- Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
+  4e-20 gave NaN and left the map unchanged.
 - On CUDA, the tensor-core kernel loops over chunks of 16 features instead of 32 on GPUs whose blocks lack the shared
   memory for the pipeline buffers of chunks of 32, as Triton reports when it launches the kernel. Compiled by Triton 3.8
   for compute capability 10.0 (B200), chunks of 32 take 240 KB of shared memory, beyond its 227 KB, so that there the

@@ -1,8 +1,9 @@
 # fastersom
 
 A small, fast batch self-organising map (SOM) in [PyTorch](https://pytorch.org): a reimplementation of Kohonen's
-batch map {cite:p}`Kohonen_2001` with a rectangular grid, gaussian neighbourhood and exponentially decaying
-neighbourhood width. It computes the same batch update as [XPySom](https://github.com/Manciukic/xpysom)
+batch map {cite:p}`Kohonen_2001` with a rectangular grid, by default with a gaussian neighbourhood and exponentially
+decaying neighbourhood width; other neighbourhoods, grid distances and width schedules, such as FlowSOM's, are
+[options](guide/neighbourhoods.md). It computes the same batch update as [XPySom](https://github.com/Manciukic/xpysom)
 {cite:p}`Mancini_2020`, with a gaussian neighbourhood of initial width half the grid that decays to a tenth of that, at
 most one grid unit. On maps up to 40 x 40 nodes the defaults thus reproduce XPySom's batch-trained maps; on larger maps,
 pass `sigma_final=0.1 * sigma_initial` for XPySom's schedule.
@@ -95,9 +96,10 @@ h(j, k) = \exp\left(-\frac{\lVert r_j - r_k \rVert^2}{2 \sigma(t)^2}\right),
 $$
 
 with grid coordinates $r$ and $\sigma(t) = \sigma_\text{initial} (\sigma_\text{final} / \sigma_\text{initial})^{t /
-n_\text{epochs}}$, where $t = 0, \ldots, n_\text{epochs} - 1$; a node whose denominator is 0 keeps its weights. There is no learning rate, because it cancels in the
-batch update {cite:p}`Kohonen_2001,Vesanto_2000`. Only the rectangular topology, gaussian neighbourhood and
-exponential decay are supported.
+n_\text{epochs}}$, where $t = 0, \ldots, n_\text{epochs} - 1$; a node whose denominator is not positive keeps its
+weights. There is no learning rate, because it cancels in the batch update {cite:p}`Kohonen_2001,Vesanto_2000`. These
+are the defaults; [](guide/neighbourhoods.md) describes the other neighbourhood functions, grid distances and width
+schedules. Only the rectangular topology is supported.
 
 ```{toctree}
 :hidden: true

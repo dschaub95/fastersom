@@ -9,7 +9,7 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A small, fast batch self-organising map (SOM) in PyTorch: a reimplementation of Kohonen's batch map with a
-rectangular grid, gaussian neighbourhood and exponentially decaying neighbourhood width. It computes the same batch update as
+rectangular grid, by default with a gaussian neighbourhood and exponentially decaying neighbourhood width. It computes the same batch update as
 [XPySom](https://github.com/Manciukic/xpysom), with a gaussian neighbourhood of initial width half the grid that
 decays to a tenth of that, at most one grid unit. Data stays on the device (CUDA, MPS or CPU) and the per-epoch update smooths per-node sums with the
 separable gaussian, one small matrix product along each grid axis, so an epoch costs little more than one BMU search.
@@ -58,6 +58,18 @@ Options:
 - `sigma_initial` and `sigma_final` set the neighbourhood width schedule. `sigma_final` defaults to
   `min(0.1 * sigma_initial, 1)`, so that large maps are not smoothed beyond the resolution of their units;
   `sigma_final=0.1 * sigma_initial` reproduces XPySom's schedule.
+- `neighbourhood`, `grid_metric`, `sigma_schedule` and `schedule_end` (keyword only) choose the neighbourhood
+  function (`"gaussian"`, the default, `"bubble"`, `"triangle"`, `"epanechnikov"`, `"cut_gaussian"` or
+  `"mexican_hat"`), the distance between grid positions (`"euclidean"`, the default, `"chebyshev"` or `"manhattan"`),
+  how the width decays (`"exponential"`, the default, `"linear"`, `"inverse"`, or the widths of all epochs as a
+  sequence) and whether the last epoch uses `sigma_final` (`"last_epoch"`, the default under linear and inverse) or
+  the schedule would reach it one epoch later (`"after_last_epoch"`, the default under exponential, which keeps
+  0.7.0's width schedule). Under `"linear"`, `sigma_final=0` is allowed, and a width of 0 leaves only the winner, a batch
+  k-means step. `sigma_initial="flowsom"` takes FlowSOM's initial radius, the 0.67 quantile of the grid distances.
+  FlowSOM's settings are `SOM(10, 10, n_epochs=10, neighbourhood="bubble", grid_metric="chebyshev",
+  sigma_schedule="linear", sigma_initial="flowsom", sigma_final=0)`, whose last epoch is a k-means step; the
+  [user guide](https://fastersom.readthedocs.io/en/latest/guide/neighbourhoods.html) has the formulas and the settings
+  of MiniSom, XPySom and the SOM Toolbox.
 - `batch_size` bounds memory (about `batch_size x n_nodes` floats, `batch_size x n_features` with the fused
   [CUDA](#fused-cuda-kernels) or [Metal](#fused-metal-kernels) kernels) without changing the algorithm. On CUDA and MPS
   it defaults to the largest batch that still helps speed and fits in `memory_fraction` (default 0.9 on CUDA, 0.5 on
@@ -74,12 +86,12 @@ Options:
   search and takes the torch path instead, without compiling anything. It only matters on CUDA and MPS.
 - `precision="float16"` lets `fit`'s BMU search round samples and nodes to 11 significant bits, summing the products in
   float32, as half inputs to the [Metal kernels](#fused-metal-kernels) on MPS, scaled by powers of 2 into half's range.
-  It applies under euclidean, cosine and correlation from 16 features; elsewhere, and on CUDA, the search stays float32,
-  as do `labels_`, `predict`, `transform` and the error measures. The BMUs of near-tied samples flip, more on larger
-  maps (of clustered 0-1 pixels about 1% at 10 x 10 nodes and 10-35% from 30 x 30), which gives an equally good map
-  rather than the same one: in our tests the same quantization error, but a topographic error up to 1.4x higher on
-  synthetic clusters. It is meant for GPUs whose half products are much faster than float32 ones, such as the M5's,
-  where it is untested; on an M3 Max `fit` is only 1.00-1.05x faster.
+  It applies under euclidean, cosine and correlation from 16 features, except with `neighbourhood="mexican_hat"`;
+  elsewhere, and on CUDA, the search stays float32, as do `labels_`, `predict`, `transform` and the error measures. The
+  BMUs of near-tied samples flip, more on larger maps (of clustered 0-1 pixels about 1% at 10 x 10 nodes and 10-35% from
+  30 x 30), which gives an equally good map rather than the same one: in our tests the same quantization error, but a
+  topographic error up to 1.4x higher on synthetic clusters. It is meant for GPUs whose half products are much faster
+  than float32 ones, such as the M5's, where it is untested; on an M3 Max `fit` is only 1.00-1.05x faster.
 
 Fitted maps pickle without device tensors and load on the configured device if available, else on the default one,
 so a map fitted on a GPU loads on a CPU-only machine. `BatchSOM` is an alias for `SOM`.
@@ -132,7 +144,7 @@ the first fit's time in `first_fit_s`; `--library`, `--device` and `--size` run 
 | [XPySom](https://github.com/Manciukic/xpysom) (CuPy) | 30 x 30   | NVIDIA A100    | 8,096               | 0.46 s   | 313 MiB         | 0.169              |
 | XPySom (CuPy)                                        | 30 x 30   | NVIDIA A100    | 65,536              | 0.41 s   | 2088 MiB        | 0.169              |
 | [torchsom](https://github.com/michelin/TorchSOM)     | 30 x 30   | NVIDIA A100    | 1,024               | 22.2 s   | 44 MiB          | 0.175              |
-| fastersom                                            | 30 x 30   | 16 CPU threads | default (8,192)     | 1.8 s    | -               | 0.169              |
+| fastersom                                            | 30 x 30   | 16 CPU threads | 8,192               | 1.8 s    | -               | 0.169              |
 | XPySom (NumPy)                                       | 30 x 30   | 16 CPU threads | 8,096               | 25.6 s   | -               | 0.168              |
 | torchsom                                             | 30 x 30   | 16 CPU threads | 1,024               | 36.2 s   | -               | 0.176              |
 | fastersom                                            | 100 x 100 | NVIDIA A100    | default (480,000)   | 0.18 s   | 298 MiB         | 0.162              |
@@ -140,13 +152,13 @@ the first fit's time in `first_fit_s`; `--library`, `--device` and `--size` run 
 | fastersom                                            | 100 x 100 | NVIDIA A100    | 8,096               | 0.21 s   | 110 MiB         | 0.162              |
 | fastersom, `fused=False`                             | 100 x 100 | NVIDIA A100    | 8,096               | 0.52 s   | 400 MiB         | 0.162              |
 | XPySom (CuPy)                                        | 100 x 100 | NVIDIA A100    | 8,096               | 2.8 s    | 2846 MiB        | 0.162              |
-| fastersom                                            | 100 x 100 | 16 CPU threads | default (8,192)     | 62.4 s   | -               | 0.162              |
+| fastersom                                            | 100 x 100 | 16 CPU threads | 8,192               | 62.4 s   | -               | 0.162              |
 | fastersom                                            | 200 x 200 | NVIDIA A100    | default (1,118,481) | 11.8 s   | 2244 MiB        | 0.380              |
 | fastersom, `fused=False`                             | 200 x 200 | NVIDIA A100    | default (6,710)     | 29.4 s   | 3294 MiB        | 0.380              |
 | fastersom                                            | 200 x 200 | NVIDIA A100    | 8,096               | 12.3 s   | 1346 MiB        | 0.380              |
 | fastersom, `fused=False`                             | 200 x 200 | NVIDIA A100    | 8,096               | 28.7 s   | 3718 MiB        | 0.380              |
 | XPySom (CuPy)                                        | 200 x 200 | NVIDIA A100    | 8,096               | 118.8 s  | 12292 MiB       | 0.380              |
-| fastersom                                            | 200 x 200 | 16 CPU threads | default (8,192)     | 43 min   | -               | 0.380              |
+| fastersom                                            | 200 x 200 | 16 CPU threads | 8,192               | 43 min   | -               | 0.380              |
 
 With less GPU memory fastersom is about 10x faster than XPySom on a 30 x 30 map, 16x faster on a 100 x 100 map
 (with a tenth of the memory) and 10x faster on a 200 x 200 map (with a ninth of the memory), and 14x faster on the CPU.
@@ -161,10 +173,10 @@ instead of 0.6 s), and with the kernels cached on disk by an earlier run 0.6 s l
 
 fastersom follows Kohonen's batch map (T. Kohonen, *Self-Organizing Maps*, 3rd ed., Springer, 2001). Each epoch assigns
 every sample to its best matching unit and sets every node to the neighbourhood-weighted mean of the samples, with
-neighbourhood `h(j, k) = exp(-||r_j - r_k||^2 / (2 sigma(t)^2))` on the grid coordinates `r` and
+neighbourhood `h(j, k) = h(d(r_j, r_k); sigma(t))` of the distance `d` between the grid coordinates `r`. By default
+`h` is the gaussian `exp(-d^2 / (2 sigma(t)^2))` of the euclidean distance and
 `sigma(t) = sigma_initial * (sigma_final / sigma_initial) ** (t / n_epochs)`. There is no learning rate, because it
-cancels in the batch update. Only the rectangular topology, gaussian neighbourhood and exponential decay are
-supported.
+cancels in the batch update. Only the rectangular topology is supported.
 
 ## Development
 
