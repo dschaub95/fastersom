@@ -7,7 +7,7 @@
   for compute capability 10.0 (B200), chunks of 32 take 240 KB of shared memory, beyond its 227 KB, so that there the
   kernel should have failed its self-check from 25 features, warned and left the float32 kernel or the torch path; for
   8.x they take 128-144 KB, beyond the 99 KB of Ada and consumer Ampere GPUs. Chunks of 16 take at most 120 KB.
-  Untested on these GPUs: the sizes come from compiling the kernel for them without a GPU.
+  Tested only on an RTX 6000 Ada (see below); the sizes come from compiling the kernel for these GPUs without one.
 - On CUDA, Ada GPUs (compute capability 8.9: RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40 series) search under
   euclidean, cosine and correlation on tensor cores from 128 features on, in chunks of 16 features. Measured on an RTX
   6000 Ada (500,000 samples, 10 epochs): below 128 features the float32 kernel is faster (a fit at 34 features took
