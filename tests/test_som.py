@@ -1271,7 +1271,7 @@ def test_stream_cuda_copies(data, tmp_path, monkeypatch):
     som = SOM(**kwargs).fit(data)
     path = tmp_path / "X.npy"
     np.save(path, data.astype(np.float64))
-    for X in (np.load(path, mmap_mode="r"), torch.from_numpy(data), Rows(data)):
+    for X in (np.load(path, mmap_mode="r"), torch.from_numpy(data).requires_grad_(), Rows(data)):
         streamed = SOM(**kwargs, stream=True).fit(X)
         np.testing.assert_array_equal(streamed.weights_, som.weights_)
         np.testing.assert_array_equal(streamed.predict(X), som.labels_)

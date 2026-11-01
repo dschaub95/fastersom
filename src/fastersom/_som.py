@@ -365,7 +365,7 @@ class _Stream:
         """Reads rows start to stop (all within X) into the first rows of a float32 buffer on the CPU."""
         rows = self.X[start:stop]
         if isinstance(rows, torch.Tensor):
-            buffer[: stop - start].copy_(rows)
+            buffer[: stop - start].copy_(rows.detach())
         else:  # converted while copied, as torch.as_tensor(X, dtype=torch.float32) does
             np.copyto(buffer[: stop - start].numpy(), rows, casting="unsafe")
 
