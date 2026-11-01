@@ -30,6 +30,17 @@
     nodes beyond the range of the samples and initial weights that half's scaling is checked against.
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
+- On CUDA, the tensor-core kernel loops over chunks of 16 features instead of 32 on GPUs whose blocks lack the shared
+  memory for the pipeline buffers of chunks of 32, as Triton reports when it launches the kernel. Compiled by Triton 3.8
+  for compute capability 10.0 (B200), chunks of 32 take 240 KB of shared memory, beyond its 227 KB, so that there the
+  kernel should have failed its self-check from 25 features, warned and left the float32 kernel or the torch path; for
+  8.x they take 128-144 KB, beyond the 99 KB of Ada and consumer Ampere GPUs. Chunks of 16 take at most 120 KB.
+  Tested only on an RTX 6000 Ada (see below); the sizes come from compiling the kernel for these GPUs without one.
+- On CUDA, Ada GPUs (compute capability 8.9: RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40 series) search under
+  euclidean, cosine and correlation on tensor cores from 128 features on, in chunks of 16 features. Measured on an RTX
+  6000 Ada (500,000 samples, 10 epochs): below 128 features the float32 kernel is faster (a fit at 34 features took
+  1.1-1.9x as long on tensor cores), at 128 they are even or faster (0.81-0.98x), and from 196 to 512 features a fit
+  takes 0.56-0.72x as long as with cuBLAS; the BMUs agree with the torch path's up to near-ties (at least 0.99998).
 
 ## 0.7.0 (2026-10-29)
 
