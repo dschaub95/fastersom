@@ -50,11 +50,11 @@ kernels:
   beyond which cuBLAS's matrix product is as fast and the torch path is used.
 
 On an A100, this makes `fit` under euclidean 2.3-3x faster than the torch path from 30 x 30 to 200 x 200 nodes, with a
-third to a sixth of the memory, and 240x faster under manhattan, whose torch path takes `torch.cdist`. Only the A100 has
-been tested. On Ada GPUs, whose TF32 tensor cores do 2x the multiply-adds of their float32 cores (1x on the L40 and
-GeForce RTX 40 cards) rather than the A100's 8x, the tensor-core kernel may be no faster than the float32 kernel. GPUs
-that report compute capability 9.0 with cut-down tensor cores, such as the H20, also get the tensor-core kernel, which
-is likely slower there.
+third to a sixth of the memory, and 240x faster under manhattan, whose torch path takes `torch.cdist`. Only the A100 and
+the RTX 6000 Ada have been tested. The TF32 tensor cores of the RTX 6000 Ada, L40S and L4 do 2x the multiply-adds of
+their float32 cores rather than the A100's 8x, and those of the L40 and GeForce RTX 40 cards 1x, where the tensor-core
+kernel may gain nothing even from 128 features on. GPUs that report compute capability 9.0 with cut-down tensor cores,
+such as the H20, also get the tensor-core kernel, which is likely slower there.
 
 The first use of a feature count compiles its kernel, in 2-4 s; Triton caches it on disk for later processes.
 Compiling needs a C compiler and the Python headers (for example the `python3-dev` package, or a Python installed by
