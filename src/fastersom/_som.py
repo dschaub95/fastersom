@@ -466,9 +466,8 @@ class SOM:
             kernels += ["metal"] if metal.supported(n_features, manhattan) else []
         elif _triton(self._device) is not None:
             if not manhattan and n_nodes > 64 and n_nodes * n_features >= 8192:
-                kernels += (
-                    ["tensor-core"] if _tensor_cores(torch.cuda.get_device_capability(self._device), n_features) else []
-                )
+                tensor_cores = _tensor_cores(torch.cuda.get_device_capability(self._device), n_features)
+                kernels += ["tensor-core"] if tensor_cores else []
             kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
         return next((k for k in kernels if _works(self._device, k, n_features, self.metric, top2)), None)
 
