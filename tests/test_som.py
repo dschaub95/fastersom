@@ -510,10 +510,9 @@ def test_tensor_cores_on_any_tf32_gpu(fresh, monkeypatch, largest, metric, n_sam
 def test_ada_searches_on_tensor_cores_from_128_features(fused):
     # Ada GPUs (RTX 6000 Ada, L40S, L4, L40, GeForce RTX 40) take the float32 kernel below 128 features and the
     # tensor-core kernel from 128 on
-    X, som = search_case("euclidean", 3001, 34, 30, 30, "cuda")
-    assert som._kernel(34) == "float32"
     X, som = search_case("euclidean", 1500, 196, 9, 9, "cuda")
-    assert som._kernel(196) == "tensor-core"
+    assert som._kernel(127) == "float32"
+    assert som._kernel(128) == som._kernel(196) == "tensor-core"
     assert_fused_matches_torch(som, X, "cuda")
 
 
