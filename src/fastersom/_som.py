@@ -42,24 +42,23 @@ _INITS = ("random", "sample", "pca")
 # the matrix product is compute-bound and cuBLAS catches up (as fast at 192, 0.9x at 256). Manhattan's fused kernel is
 # always faster than cdist
 _FUSED_MAX_FEATURES = 128
-# Compute capabilities of data-centre GPUs (A100, H100, B200), whose TF32 tensor cores do about 8x the multiply-adds of
-# their float32 cores, so that three TF32 products per float32 product still win; on GeForce, RTX and L40 GPUs they do
-# 1-2x. There the tensor-core kernel searches dot-product scores at any feature count (on an A100, fit 1.5x faster than
-# with the float32 kernel at 34 features from 100 x 100 nodes, 1.4-1.8x at 128, 1.3-1.8x faster than cuBLAS beyond). The
-# capability does not tell variants with cut-down tensor cores such as the H20 (9.0), where it is likely slower; timing
-# both kernels on the device instead could pick differently from run to run, and so change the map
-_FAST_TF32 = ((8, 0), (9, 0), (10, 0))
-# Compute capabilities whose tensor cores win only from a number of features on: Ada (8.9), whose TF32 tensor cores do
-# 2x (RTX 6000 Ada, L40S, L4) or 1x (L40, GeForce RTX 40) its float32 multiply-adds. On an RTX 6000 Ada (500,000 samples
-# of uniform data, 10 epochs, 30 x 30 and 100 x 100 nodes) a fit took 1.9x and 1.1x as long on tensor cores as with the
-# float32 kernel at 34 features, 1.1x and 0.85x at 64, 0.98x and 0.81x at 128, and 0.56-0.72x as long as with cuBLAS
-# from 196 to 512; the BMUs agreed with the torch path's up to near-ties (at least 0.99998 of the samples)
-_TF32_FROM_FEATURES = {(8, 9): 128}
+# Compute capabilities whose tensor cores search dot-product scores, and the features from which they do. Data-centre
+# GPUs (A100, H100, B200), whose TF32 tensor cores do about 8x the multiply-adds of their float32 cores, so that three
+# TF32 products per float32 product still win, use them at any feature count (on an A100, fit 1.5x faster than with the
+# float32 kernel at 34 features from 100 x 100 nodes, 1.4-1.8x at 128, 1.3-1.8x faster than cuBLAS beyond). Ada (8.9),
+# whose TF32 tensor cores do 2x (RTX 6000 Ada, L40S, L4) or 1x (L40, GeForce RTX 40) its float32 multiply-adds, uses
+# them from 128 features: on an RTX 6000 Ada (500,000 samples of uniform data, 10 epochs, 30 x 30 and 100 x 100 nodes) a
+# fit took 1.9x and 1.1x as long on tensor cores as with the float32 kernel at 34 features, 1.1x and 0.85x at 64, 0.98x
+# and 0.81x at 128, and 0.56-0.72x as long as with cuBLAS from 196 to 512; the BMUs agreed with the torch path's up to
+# near-ties (at least 0.99998 of the samples). The capability does not tell variants with cut-down tensor cores such as
+# the H20 (9.0), where they are likely slower; timing both kernels on the device instead could pick differently from
+# run to run, and so change the map
+_TF32_FROM_FEATURES = {(8, 0): 0, (9, 0): 0, (10, 0): 0, (8, 9): 128}
 
 
 def _tensor_cores(capability: tuple[int, int], n_features: int) -> bool:
     """Return whether a GPU of this compute capability searches dot-product scores on tensor cores at n_features."""
-    return capability in _FAST_TF32 or n_features >= _TF32_FROM_FEATURES.get(capability, float("inf"))
+    return n_features >= _TF32_FROM_FEATURES.get(capability, float("inf"))
 
 
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device

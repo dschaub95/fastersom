@@ -499,7 +499,7 @@ def test_tensor_cores_on_any_tf32_gpu(fresh, monkeypatch, largest, metric, n_sam
     if torch.cuda.get_device_capability() < (8, 0):
         pytest.skip("no TF32 tensor cores")
     kernels = fresh._triton(torch.device("cuda"))
-    monkeypatch.setattr(fresh, "_FAST_TF32", [torch.cuda.get_device_capability()])
+    monkeypatch.setattr(fresh, "_TF32_FROM_FEATURES", {torch.cuda.get_device_capability(): 0})
     monkeypatch.setattr(kernels, "_TC_LOOP_K", {torch.device("cuda", torch.cuda.current_device()): largest})
     X, som = search_case(metric, n_samples, n_features, n_rows, n_cols, "cuda")
     assert som._kernel(n_features) == "tensor-core"
@@ -752,7 +752,7 @@ def test_fused_kernel_failure_degrades(data, fresh, monkeypatch):
     # wrong BMUs from the tensor-core kernel (made available here on any GPU) fail its self-check, which leaves the
     # float32 kernel; a failure of that one leaves the torch path
     kernels = fresh._triton(torch.device("cuda"))
-    monkeypatch.setattr(fresh, "_FAST_TF32", [torch.cuda.get_device_capability()])
+    monkeypatch.setattr(fresh, "_TF32_FROM_FEATURES", {torch.cuda.get_device_capability(): 0})
     bmus = kernels._bmus
     monkeypatch.setattr(kernels, "_bmus", lambda *args: bmus(*args) // 2 if args[6] else bmus(*args))
     X = np.random.default_rng(0).normal(size=(1000, 20)).astype(np.float32)
