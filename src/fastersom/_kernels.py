@@ -7,7 +7,7 @@ as a sum of outer products over the features in float32, and only the best node 
 Gluon sets the tiling explicitly: 8 x 8 scores per thread take 16 loads per 64 multiply-adds, whereas plain Triton
 gives each thread a column of samples for one node, a load per multiply-add, at under half the speed.
 
-On the GPUs of fastersom._som._FAST_TF32, most of whose TF32 tensor cores far outpace their float32 cores, dot-product
+Where fastersom._som._tensor_cores says so, on GPUs whose TF32 tensor cores outpace their float32 cores, dot-product
 scores instead come from _tc_kernel, a plain Triton kernel of the same structure on tensor cores, as 3xTF32 (three TF32
 products per float32 product). Its loop over the features takes chunks of 32 where their pipeline buffers fit in a
 block's shared memory, else of 16.
