@@ -14,6 +14,8 @@ The working memory of the BMU search is about
 - `batch_size x n_features` floats with the fused CUDA or Metal kernels (a few copies of the batch, no scores).
 
 On top of it come the data itself, `n_samples x n_features` float32 values on the device, and the nodes, which are small.
+With `stream=True` the data stays on the host, and the device holds two more batches instead, the next one and the
+last one until its search has finished (see [](devices.md)); the default batch size leaves room for them.
 
 ## The default
 

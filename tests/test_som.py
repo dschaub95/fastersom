@@ -636,7 +636,7 @@ def test_pickle_round_trip(data, monkeypatch):
     state = som.__getstate__()
     for key in ("memory_fraction", "verbose", "deterministic", "fused", "precision"):  # pickled by 0.2
         del state[key]
-    for key in ("neighbourhood", "grid_metric", "sigma_schedule", "schedule_end"):  # pickled by 0.7.0
+    for key in ("neighbourhood", "grid_metric", "sigma_schedule", "schedule_end", "stream"):  # pickled by 0.7.0
         del state[key]
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
@@ -1025,7 +1025,7 @@ def test_fused_compile_failure_falls_back(data, fresh, monkeypatch):
     assert "-I/include" not in str(record[0].message)
     assert record[0].filename == __file__  # the caller's line, not fastersom's
     # the batch size is chosen for the torch path, before any batch is searched
-    assert som._batch_size_for(torch.as_tensor(data), som._kernel(6)) <= 2**28 // 36  # the fused one: 2^26 / 6
+    assert som._batch_size_for(data.shape[1], som._kernel(6)) <= 2**28 // 36  # the fused one: 2^26 / 6
     np.testing.assert_array_equal(som.predict(data), expected)  # no second warning
 
 
@@ -1130,5 +1130,161 @@ def test_cpu_batch_size_by_nodes_and_features(monkeypatch, platform, expected):
     for (n_rows, n_cols), n_features in (((10, 10), 34), ((10, 10), 2000), ((100, 100), 34), ((200, 200), 34)):
         som = SOM(n_rows, n_cols, device=CPU)
         som._setup()
-        sizes.append(som._batch_size_for(torch.zeros(4, n_features), None))
+        sizes.append(som._batch_size_for(n_features, None))
     assert tuple(sizes) == expected
+
+
+STREAM_KWARGS = {"n_rows": 6, "n_cols": 5, "n_epochs": 3, "random_state": 0, "batch_size": 512}
+
+
+class Rows:
+    """Rows of an array behind slicing and a shape only, as an h5py or zarr dataset."""
+
+    def __init__(self, X):
+        self.shape, self._X = X.shape, X
+
+    def __getitem__(self, rows):
+        assert isinstance(rows, slice)
+        return self._X[rows]
+
+
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("metric", METRICS)
+@pytest.mark.parametrize("init", ["random", "sample", "pca"])
+def test_stream_matches_in_memory(data, device, metric, init):
+    # the same batches in the same order give the same map bit for bit, on GPUs with fixed-point sums
+    X = data.copy()
+    X[::10] = 0  # without a BMU under cosine and correlation, which init="sample" and "pca" leave out
+    kwargs = {**STREAM_KWARGS, "metric": metric, "init": init, "device": device, "deterministic": True}
+    expected = SOM(**kwargs).fit(X).weights_
+    np.testing.assert_array_equal(SOM(stream=True, **kwargs).fit(X).weights_, expected)
+
+
+def test_stream_inputs(data, tmp_path, monkeypatch):
+    expected = SOM(**STREAM_KWARGS, device=CPU).fit(data).weights_
+    path = tmp_path / "X.npy"
+    np.save(path, data.astype(np.float64).reshape(50, 100, 6))
+    memmap = np.load(path, mmap_mode="r")  # read-only, float64, reshaped as a view
+    for X in (memmap, np.load(path, mmap_mode="r+"), torch.from_numpy(data), data.tolist(), Rows(data)):
+        som = SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(X)
+        np.testing.assert_array_equal(som.weights_, expected)
+        assert not hasattr(som, "labels_")
+    # float64 rounds to float32 as in memory
+    X = data + np.random.default_rng(0).normal(scale=1e-6, size=data.shape)
+    np.testing.assert_array_equal(
+        SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(X).weights_, SOM(**STREAM_KWARGS, device=CPU).fit(X).weights_
+    )
+    # the CPU's sums in parts of several batches, the last one shorter
+    from fastersom import _som
+
+    monkeypatch.setattr(_som, "_CPU_SUM_ROWS", 1300)
+    np.testing.assert_array_equal(
+        SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(data).weights_,
+        SOM(**STREAM_KWARGS, device=CPU).fit(data).weights_,
+    )
+
+
+def test_stream_input_validation(data, tmp_path):
+    som = SOM(**STREAM_KWARGS, device=CPU, stream=True)
+    for X in (data[0], data[:0]):
+        with pytest.raises(ValueError, match="shape"):
+            som.fit(X)
+    path = tmp_path / "X.npy"
+    np.save(path, data.reshape(50, 100, 6))
+    for X in (np.load(path, mmap_mode="r").transpose(1, 0, 2), Rows(data.reshape(50, 100, 6))):
+        with pytest.raises(ValueError, match="C-contiguous"):  # reshaping would read all of X
+            som.fit(X)
+    for value in (np.nan, np.inf):
+        bad = data.copy()
+        bad[4321, 2] = value  # in the last of several batches
+        with pytest.raises(ValueError, match="NaN"):
+            som.fit(bad)
+    with pytest.raises(ValueError, match="with a BMU"):
+        SOM(init="sample", metric="cosine", device=CPU, stream=True).fit(np.zeros((10, 6)))
+
+
+def test_stream_pickle(data):
+    som = SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(data)
+    loaded = pickle.loads(pickle.dumps(som))
+    assert loaded.stream
+    np.testing.assert_array_equal(loaded.fit(data).weights_, som.weights_)
+    np.testing.assert_array_equal(som.fit_predict(data), SOM(**STREAM_KWARGS, device=CPU).fit(data).labels_)
+
+
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("metric", METRICS)
+def test_stream_predict_transform_and_errors(data, device, metric):
+    X = data.copy()
+    X[::10] = 0  # without a BMU under cosine and correlation
+    kwargs = {**STREAM_KWARGS, "metric": metric, "device": device, "deterministic": True}
+    som = SOM(**kwargs).fit(X)
+    streamed = SOM(**kwargs, stream=True).fit(X)
+    labels, distances = streamed.predict(X, return_distance=True)
+    np.testing.assert_array_equal(labels, som.labels_)
+    np.testing.assert_array_equal(streamed.predict(X), som.labels_)
+    np.testing.assert_array_equal(distances, som.predict(X, return_distance=True)[1])
+    np.testing.assert_array_equal(streamed.fit_predict(X), som.labels_)
+    np.testing.assert_array_equal(streamed.transform(X), som.transform(X))
+    assert streamed.quantization_error(X) == som.quantization_error(X)
+    # streamed, the samples with a BMU are regrouped into the batches of the search in memory
+    assert streamed.topographic_error(X) == som.topographic_error(X)
+
+
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("metric", METRICS)
+def test_stream_kept_batches(data, device, metric):
+    # the batches of data[has_bmu].split(batch_size), also across batches without any sample with a BMU
+    X = data.copy()
+    X[::7] = 0
+    X[600:1700] = 0
+    som = SOM(**STREAM_KWARGS, metric=metric, device=device).fit(data)
+    streamed = SOM.from_weights(som.weights_, 6, 5, metric=metric, device=device, stream=True)
+    has_bmu = som._has_bmu(torch.as_tensor(X))
+    kept = torch.as_tensor(X) if has_bmu is None else torch.as_tensor(X)[has_bmu]
+    batches = [batch.cpu() for batch in streamed._kept_batches(streamed._check_X(X), 512)]
+    assert [len(batch) for batch in batches] == [len(batch) for batch in kept.split(512)]
+    np.testing.assert_array_equal(torch.cat(batches).numpy(), kept.numpy())
+    assert streamed.topographic_error(X) == som.topographic_error(X)
+
+
+def test_stream_predict_input_validation(data, tmp_path):
+    som = SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(data)
+    path = tmp_path / "X.npy"
+    np.save(path, data.reshape(50, 100, 6))
+    np.testing.assert_array_equal(som.predict(np.load(path, mmap_mode="r")), som.predict(data))
+    bad = data.copy()
+    bad[4321, 2] = np.nan
+    for method in (som.predict, som.transform, som.quantization_error, som.topographic_error):
+        with pytest.raises(ValueError, match="NaN"):  # at the end of the pass
+            method(bad)
+        with pytest.raises(ValueError, match="features"):
+            method(data[:, :3])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_stream_cuda_copies(data, tmp_path, monkeypatch):
+    # through pinned buffers smaller than a batch, so that batches arrive in several copies, the last one shorter
+    from fastersom import _som
+
+    monkeypatch.setattr(_som, "_PINNED_VALUES", 1000)  # 166 rows of 6 features
+    kwargs = {**STREAM_KWARGS, "device": "cuda", "deterministic": True}
+    som = SOM(**kwargs).fit(data)
+    path = tmp_path / "X.npy"
+    np.save(path, data.astype(np.float64))
+    for X in (np.load(path, mmap_mode="r"), torch.from_numpy(data).requires_grad_(), Rows(data)):
+        streamed = SOM(**kwargs, stream=True).fit(X)
+        np.testing.assert_array_equal(streamed.weights_, som.weights_)
+        np.testing.assert_array_equal(streamed.predict(X), som.labels_)
+    bad = data.copy()
+    bad[4321, 2] = np.nan
+    with pytest.raises(ValueError, match="NaN"):
+        SOM(**kwargs, stream=True).fit(bad)
+
+
+def test_nth_true():
+    from fastersom._som import _nth_true
+
+    mask = np.random.default_rng(0).random(3_000_000) < 0.3
+    first = int(mask[: 1 << 20].sum())  # the first block's True values
+    ranks = np.r_[np.random.default_rng(1).integers(0, mask.sum(), 1000), 0, first - 1, first, mask.sum() - 1]
+    np.testing.assert_array_equal(_nth_true(mask, ranks), np.flatnonzero(mask)[ranks])
