@@ -233,15 +233,15 @@ class SOM:
     On CUDA with Triton's Gluon (Triton >= 3.5, part of torch's Linux wheels from torch 2.9), the BMU search of fit,
     predict, quantization_error and topographic_error runs in a fused kernel that never stores the batch x nodes scores:
     under manhattan always, under the other metrics up to 128 features, beyond which cuBLAS's matrix product is as fast.
-    It computes in float32 like the torch path, so the BMUs differ only on near-ties. On A100, H100 and B200 GPUs, the
-    other metrics' search instead runs on tensor cores at any feature count, and on Ada GPUs (such as the RTX 6000 Ada
-    and L40S) from 128 features on (for maps of over 64 nodes and nodes x features >= 8192), with float32 accuracy from three TF32 products per product
-    (3xTF32); its BMUs too differ only on near-ties, and match float64's more often than float32's. The first use of a
-    feature count compiles the kernel (2-4 s the first time, cached on disk by Triton), which needs a C compiler and the
-    Python headers, and checks it on a tiny search; a kernel that fails warns and leaves the next one (tensor cores,
-    float32 kernel, torch path). On MPS (torch >= 2.6) the search runs in fused Metal kernels, in float32 on the
-    simdgroup matrix units (on the ALUs under manhattan, up to 512 features), compiled at runtime in about 0.2 s per
-    feature count and checked in the same way.
+    It computes in float32 like the torch path, so the BMUs differ only on near-ties. On A100, H100 and B200 GPUs at any
+    feature count, and on Ada GPUs (such as the RTX 6000 Ada and L40S) from 128 features on, the other metrics' search
+    instead runs on tensor cores (for maps of over 64 nodes and nodes x features >= 8192), with float32 accuracy from
+    three TF32 products per product (3xTF32); its BMUs too differ only on near-ties, and match float64's more often than
+    float32's. The first use of a feature count compiles the kernel (2-4 s the first time, cached on disk by Triton),
+    which needs a C compiler and the Python headers, and checks it on a tiny search; a kernel that fails warns and
+    leaves the next one (tensor cores, float32 kernel, torch path). On MPS (torch >= 2.6) the search runs in fused Metal
+    kernels, in float32 on the simdgroup matrix units (on the ALUs under manhattan, up to 512 features), compiled at
+    runtime in about 0.2 s per feature count and checked in the same way.
 
     Parameters
     ----------
