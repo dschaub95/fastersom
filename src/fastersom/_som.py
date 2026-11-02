@@ -1124,7 +1124,7 @@ class SOM:
             return sums, torch.bincount(out, minlength=n_nodes + 1)
 
         sums = data.new_zeros(n_nodes + 1, data.shape[1])
-        counts = torch.zeros(n_nodes + 1, dtype=torch.long)
+        counts = data.new_zeros(n_nodes + 1, dtype=torch.long)
         for part_sum, part_count in _cpu_map(pool, part_sums, data, labels, batch_size):
             sums += part_sum
             counts += part_count
@@ -1192,7 +1192,8 @@ class SOM:
         tables = self.n_epochs * (2 * self.n_rows - 1) * (2 * self.n_cols - 1)
         smoothers = [self._smoother(sigma) for sigma in self._sigmas] if tables <= 1 << 24 else None
         with _cpu_pool(self._device) as pool:
-            labels = torch.empty(len(data) if pool is not None else 0, dtype=torch.long)  # the CPU's BMUs per epoch
+            # the CPU's BMUs per epoch
+            labels = torch.empty(len(data) if pool is not None else 0, dtype=torch.long, device=data.device)
             for t in tqdm(range(self.n_epochs), desc="Fitting SOM", unit="epoch", disable=not self.verbose):
                 smooth = self._smoother(self._sigmas[t]) if smoothers is None else smoothers[t]
                 search = self._search(weights, kernel, magnitude=magnitude)
