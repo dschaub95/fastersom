@@ -332,13 +332,20 @@ def _cpu_map[T](
     threads: torch is set to one thread while the parts run and to its number of threads again afterwards (also on an
     error), so that the work between them, such as the neighbourhood update, keeps all of torch's threads. At most two
     parts per thread are submitted ahead of the one consumed, so that per-part sums (n_nodes x n_features each) stay
-    within that many rather than _CPU_PARTS of them. Consume the results fully, which restores torch's threads.
+    within that many rather than _CPU_PARTS of them. Consume the results fully, which restores torch's threads. The
+    threads take the caller's inference mode, which is thread-local, so that they may write into inference tensors.
     """
     if pool is None:
         yield work(data, labels, batch_size)
         return
     rows = max(_CPU_MIN_PART_ROWS, -(-len(data) // _CPU_PARTS))
     chunk = min(batch_size, rows)
+    inference = torch.is_inference_mode_enabled()
+
+    def run(part: torch.Tensor, out: torch.Tensor) -> T:
+        with torch.inference_mode(inference):
+            return work(part, out, chunk)
+
     threads = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
@@ -346,7 +353,7 @@ def _cpu_map[T](
         for part, out in zip(data.split(rows), labels.split(rows), strict=True):
             if len(pending) == 2 * threads:
                 yield pending.popleft().result()
-            pending.append(pool.submit(work, part, out, chunk))
+            pending.append(pool.submit(run, part, out))
         while pending:
             yield pending.popleft().result()
     finally:

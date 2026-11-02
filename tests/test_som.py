@@ -602,6 +602,16 @@ def test_cpu_threads_do_not_change_results(metric):
     assert one_error == four_error
 
 
+def test_cpu_pool_under_inference_mode():
+    # the pool's threads write into tensors made under the caller's inference mode, which is thread-local
+    X = np.random.default_rng(7).normal(size=(2 * _CPU_MIN_PART_ROWS, 3)).astype(np.float32)
+    with torch.inference_mode():
+        som = SOM(3, 3, n_epochs=2, random_state=0, device=CPU).fit(X)
+        assert len(som.predict(X)) == len(X)
+        assert np.isfinite(som.quantization_error(X))
+        assert 0 <= som.topographic_error(X) <= 1
+
+
 def test_single_node(data):
     som = SOM(1, 1, n_epochs=2, device=CPU).fit(data)
     np.testing.assert_allclose(som.weights_[0], data.mean(0), atol=1e-5)
