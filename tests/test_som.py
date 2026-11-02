@@ -557,6 +557,21 @@ def test_batch_size_does_not_change_results(data, metric):
         assert som.topographic_error(data) == pytest.approx(full.topographic_error(data), abs=1e-3)
 
 
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan"])
+def test_cpu_bmus_are_the_nearest_node(metric):
+    # on a grid that float32 keeps exactly, 32 nodes (a mean in 1/32) included, so that ties are exact: predict's BMUs
+    # over several batches are those of a brute-force search, the lowest index on ties
+    rng = np.random.default_rng(11)
+    X = rng.integers(-4, 5, size=(3005, 3)).astype(np.float32)
+    weights = rng.integers(-4, 5, size=(32, 3)).astype(np.float32)
+    weights[[9, 20, 31]] = weights[4]
+    distances = brute_force_distances(X, weights, metric)
+    expected = distances.argmin(1)  # numpy's argmin: the first index on ties
+    assert ((distances == distances.min(1, keepdims=True)).sum(1) > 1).mean() > 0.1  # many ties
+    som = SOM.from_weights(weights, 4, 8, metric=metric, batch_size=1000, device=CPU)
+    np.testing.assert_array_equal(som.predict(X), expected)
+
+
 def test_single_node(data):
     som = SOM(1, 1, n_epochs=2, device=CPU).fit(data)
     np.testing.assert_allclose(som.weights_[0], data.mean(0), atol=1e-5)

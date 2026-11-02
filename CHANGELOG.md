@@ -41,6 +41,8 @@
   6000 Ada (500,000 samples, 10 epochs): below 128 features the float32 kernel is faster (a fit at 34 features took
   1.1-1.9x as long on tensor cores), at 128 they are even or faster (0.81-0.98x), and from 196 to 512 features a fit
   takes 0.56-0.72x as long as with cuBLAS; the BMUs agree with the torch path's up to near-ties (at least 0.99998).
+- On the CPU the BMU search takes `min(1).indices` instead of `argmin(1)`: the same BMUs (both take the lowest index on
+  ties), a fit epoch and predict up to about 15% faster. GPUs keep argmin.
 
 ## 0.7.0 (2026-10-29)
 
