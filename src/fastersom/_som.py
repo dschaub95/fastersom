@@ -868,8 +868,10 @@ class SOM:
             scores = self._scorer(weights)
             if top2:
                 return lambda batch: scores(batch).topk(2, 1, largest=False).indices
-            if weights.device.type != "cpu":  # GPUs keep argmin: on MPS min(1) took 1.6-1.9x as long (M3 Max, 100 to
-                return lambda batch: scores(batch).argmin(1)  # 40,000 nodes); on CUDA it was not measured
+            # GPUs keep argmin: on MPS min(1) took 1.6-1.9x as long (M3 Max, 100 to 40,000 nodes); on CUDA it was not
+            # measured
+            if weights.device.type != "cpu":
+                return lambda batch: scores(batch).argmin(1)
             # on the CPU, min(1)'s indices: on one thread, argmin(1) took 74-80% of a chunk's search and min(1) 31-47%
             # less (M3 Max, 100 to 40,000 nodes x 40 features). Both return the first minimal index on ties, as torch
             # documents
