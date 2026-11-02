@@ -420,10 +420,10 @@ class SOM:
         each of torch's threads searches its own chunks of up to batch_size samples) and speed only. Each epoch's
         update is the same up to float summation order, but over several epochs such rounding differences (as between
         devices) can flip near-tied BMUs, so maps agree in quality rather than bit for bit. Defaults on the CPU to
-        2^20 / max(n_nodes, n_features), from 256 to 8192 (2^22 / max(n_nodes, n_features) beyond 16,384 nodes or features),
-        and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused kernel), fewer if that
-        does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch recommends; 65536 before
-        torch 2.5).
+        2^20 / max(n_nodes, n_features), from 256 to 8192 (2^22 / max(n_nodes, n_features) beyond 16,384 nodes or
+        features), and on GPUs to 2^28 / n_nodes (where speed levels off; 2^26 / n_features with the fused kernel),
+        fewer if that does not fit in memory_fraction of the free GPU memory (on MPS, of the memory torch recommends;
+        65536 before torch 2.5).
     memory_fraction
         Fraction of the free GPU memory the default batch_size may use, in (0, 1]. Defaults to 0.9
         on CUDA and 0.5 on MPS, whose memory the system and other apps share.
@@ -1097,9 +1097,9 @@ class SOM:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Assigns the samples and sums them per node on the CPU, part by part on the pool (see _cpu_map).
 
-        Each fixed part is searched and summed in chunks of batch_size by one thread into sums of its own, which are added
-        in the parts' order: the same sums at any number of threads. Samples without a BMU (cosine, correlation) go to
-        an extra node, n_nodes, which is dropped, rather than being copied out of their chunk.
+        Each fixed part is searched and summed in chunks of batch_size by one thread into sums of its own, which are
+        added in the parts' order: the same sums at any number of threads. Samples without a BMU (cosine, correlation)
+        go to an extra node, n_nodes, which is dropped, rather than being copied out of their chunk.
         """
 
         def part_sums(part: torch.Tensor, out: torch.Tensor, chunk: int) -> tuple[torch.Tensor, torch.Tensor]:
