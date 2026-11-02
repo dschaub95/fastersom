@@ -319,7 +319,7 @@ def _cpu_pool(device: torch.device) -> Iterator[ThreadPoolExecutor | None]:
 
 
 def _cpu_map[T](
-    pool: ThreadPoolExecutor,
+    pool: ThreadPoolExecutor | None,
     work: Callable[[torch.Tensor, torch.Tensor, int], T],
     data: torch.Tensor,
     labels: torch.Tensor,
@@ -327,12 +327,16 @@ def _cpu_map[T](
 ) -> Iterator[T]:
     """work(samples, labels, rows per chunk) of every fixed part (see _CPU_PARTS) on the pool, in the parts' order.
 
-    Each of the pool's threads runs torch on a single thread, as the small chunks of a part gain nothing from torch's
+    Without a pool (on GPUs, see _cpu_pool), only work(data, labels, batch_size), in the calling thread. Each of the
+    pool's threads runs torch on a single thread, as the small chunks of a part gain nothing from torch's
     threads: torch is set to one thread while the parts run and to its number of threads again afterwards (also on an
     error), so that the work between them, such as the neighbourhood update, keeps all of torch's threads. At most two
     parts per thread are submitted ahead of the one consumed, so that per-part sums (n_nodes x n_features each) stay
     within that many rather than _CPU_PARTS of them. Consume the results fully, which restores torch's threads.
     """
+    if pool is None:
+        yield work(data, labels, batch_size)
+        return
     rows = max(_CPU_MIN_PART_ROWS, -(-len(data) // _CPU_PARTS))
     chunk = min(batch_size, rows)
     threads = torch.get_num_threads()
@@ -908,7 +912,7 @@ class SOM:
         """BMU and, if return_distance, distance to it per sample; -1 and NaN for samples without a BMU.
 
         With a pool (on the CPU, see _cpu_pool), part by part on its threads as _cpu_step searches them; else batch by
-        batch.
+        batch (see _cpu_map).
         """
         kernel = self._kernel(data.shape[1])
         search = self._search(weights, kernel)
@@ -934,12 +938,9 @@ class SOM:
             return distances
 
         bmu = torch.empty(len(data), dtype=torch.long, device=data.device)
-        batch_size = self._batch_size_for(data, kernel)
-        if pool is not None:
-            parts = [d for part in _cpu_map(pool, part_bmus, data, bmu, batch_size) for d in part]
-        else:
-            parts = part_bmus(data, bmu, batch_size)
-        distance = torch.cat(parts) if return_distance else None
+        parts = _cpu_map(pool, part_bmus, data, bmu, self._batch_size_for(data, kernel))
+        distances = [d for part in parts for d in part]
+        distance = torch.cat(distances) if return_distance else None
         has_bmu = self._has_bmu(data)
         if has_bmu is not None:
             bmu[~has_bmu] = -1
@@ -1317,11 +1318,8 @@ class SOM:
                 rows.copy_(search(batch))
 
         with _cpu_pool(self._device) as pool:
-            if pool is not None:
-                for _ in _cpu_map(pool, part_nodes, data, nodes, self._batch_size_for(data, kernel)):
-                    pass
-            else:
-                part_nodes(data, nodes, self._batch_size_for(data, kernel))
+            for _ in _cpu_map(pool, part_nodes, data, nodes, self._batch_size_for(data, kernel)):
+                pass
         offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
         return float((offset > 1).cpu().double().mean())
 
