@@ -1,7 +1,10 @@
 {
-    "$schema": "https://biomejs.dev/schemas/2.2.0/schema.json",
+    "$schema": "https://biomejs.dev/schemas/2.6.3/schema.json",
     "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
     "formatter": { "useEditorconfig": true },
+    // Biome >= 2.6 formats these by default, but de-indents MyST definition lists and ignores the 2-space YAML indent.
+    "markdown": { "formatter": { "enabled": false } },
+    "yaml": { "formatter": { "enabled": false } },
     "overrides": [
         {
             "includes": ["./.vscode/*.json", "**/*.jsonc"],
