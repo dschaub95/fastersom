@@ -812,11 +812,19 @@ class SOM:
         Returns a function of a batch giving each sample's BMU, or with top2 its best two nodes, shape (batch, 2), by
         the given fused kernel (from _kernel), without the batch x nodes scores, or the torch path. magnitude: for
         "metal-float16", the largest |x| per feature of the samples to come, which bounds what the kernel scales.
+        Ties go to the lowest node index on every path but top2's.
         """
         if kernel is None:
             scores = self._scorer(weights)
             if top2:
                 return lambda batch: scores(batch).topk(2, 1, largest=False).indices
+            if weights.device.type == "cpu":
+                # torch documents min and argmin alike to return the first minimal index on ties, so the lowest index
+                # wins either way. On the CPU min(1) is faster: a fit epoch and predict took 0.83-0.98x as long on an
+                # AMD EPYC 7742 at 16 threads (200,000 x 16 on 10 x 10 nodes 0.84x, 240,000 x 3136 0.91x, larger
+                # maps 0.95-1.0x, where the matrix product dominates). GPUs keep argmin: on MPS min(1) took 1.6-1.9x
+                # as long (M3 Max, PR #33); CUDA was not measured
+                return lambda batch: scores(batch).min(1).indices
             return lambda batch: scores(batch).argmin(1)
         manhattan = self.metric == "manhattan"
         nodes, bias, centre = (weights, None, None) if manhattan else self._operands(weights)
