@@ -4,7 +4,8 @@
 
 - New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
   "Neighbourhoods and width schedules". The defaults keep 0.7.0's neighbourhood and width schedule and give
-  the same maps as 0.7.0, bit for bit wherever a fit is deterministic (on the CPU, and with `deterministic=True`).
+  the same maps as 0.7.0, bit for bit wherever a fit is deterministic (on the CPU, and with `deterministic=True`),
+  apart from the CPU search change below.
   - `neighbourhood`: `"gaussian"` (default), `"bubble"` (1 within the radius, inclusive, as FlowSOM and the SOM
     Toolbox), `"triangle"`, `"epanechnikov"` (the SOM Toolbox's `ep`), `"cut_gaussian"` (its `cutgauss`) or
     `"mexican_hat"`, each a function of the grid distance and the width sigma.
