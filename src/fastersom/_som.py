@@ -29,7 +29,7 @@ import sysconfig
 import warnings
 from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, suppress
 from functools import cache
 from math import ceil, floor, isfinite
@@ -348,15 +348,18 @@ def _cpu_map[T](
 
     threads = torch.get_num_threads()
     torch.set_num_threads(1)
+    pending: deque[Future[T]] = deque()
     try:
-        pending: deque[Future[T]] = deque()
         for part, out in zip(data.split(rows), labels.split(rows), strict=True):
             if len(pending) == 2 * threads:
                 yield pending.popleft().result()
             pending.append(pool.submit(run, part, out))
         while pending:
             yield pending.popleft().result()
-    finally:
+    finally:  # on an error, drop the parts not yet started and let the running ones finish on one thread each
+        for future in pending:
+            future.cancel()
+        wait(pending)
         torch.set_num_threads(threads)
 
 
