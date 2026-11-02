@@ -45,7 +45,9 @@ labels = som.predict(X)
   per sample on the host).
 - With the same batches, a streamed fit gives the same map as one in memory, bit for bit wherever a fit is
   deterministic (on the CPU, and with `deterministic=True`). Pass an explicit `batch_size` to compare the two, as the
-  default depends on the free memory.
+  default depends on the free memory. `init="sample"` is the exception: streamed, it draws its rows otherwise, in host
+  memory that does not grow with the number of samples, so that the two start from different samples for the same
+  `random_state`.
 - `fit` does not set `labels_`, which would hold an int64 per sample; `predict(X)` returns them, and `fit_predict`
   calls it. `predict`, `transform` and the error measures read `X` once, and raise for values that are not finite only
   at the end of that pass. `predict` copies each batch's BMUs and distances (12 bytes per sample) to the host as they

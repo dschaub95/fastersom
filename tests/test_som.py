@@ -1199,8 +1199,45 @@ def test_stream_matches_in_memory(data, device, metric, init):
     X = data.copy()
     X[::10] = 0  # without a BMU under cosine and correlation, which init="sample" and "pca" leave out
     kwargs = {**STREAM_KWARGS, "metric": metric, "init": init, "device": device, "deterministic": True}
-    expected = SOM(**kwargs).fit(X).weights_
-    np.testing.assert_array_equal(SOM(stream=True, **kwargs).fit(X).weights_, expected)
+    streamed = SOM(stream=True, **kwargs).fit(X).weights_
+    if init == "sample":  # drawn otherwise when streamed, so in memory from the streamed fit's initial weights
+        kwargs["init"] = SOM(stream=True, **{**kwargs, "n_epochs": 0}).fit(X).weights_
+    np.testing.assert_array_equal(streamed, SOM(**kwargs).fit(X).weights_)
+
+
+@pytest.mark.parametrize("metric", METRICS)
+def test_stream_sample_init(data, metric):
+    # distinct rows, those with a BMU under cosine and correlation, the same for a random_state
+    X = data.copy()
+    if metric in ("cosine", "correlation"):
+        X[::10] = 0
+    kwargs = {**STREAM_KWARGS, "metric": metric, "init": "sample", "n_epochs": 0, "device": CPU, "stream": True}
+    weights = SOM(**kwargs).fit(X).weights_
+    rows = (X[:, None] == weights[None]).all(-1)  # samples x nodes
+    picks = rows.argmax(0)
+    assert rows.any(0).all()
+    assert len(np.unique(picks)) == len(picks)
+    assert (picks % 10 != 0).all() or metric not in ("cosine", "correlation")
+    np.testing.assert_array_equal(SOM(**kwargs).fit(X).weights_, weights)
+    assert not np.array_equal(SOM(**{**kwargs, "random_state": 1}).fit(X).weights_, weights)
+    # with replacement for fewer candidates than nodes
+    weights = SOM(**kwargs).fit(X[:10]).weights_
+    assert (X[:10, None] == weights[None]).all(-1).any(0).all()
+
+
+def test_distinct():
+    from fastersom._som import _distinct
+
+    for n, k in ((30, 30), (31, 30), (1000, 30), (10**12, 10**4)):  # 10**12 candidates in O(k) memory
+        picks = _distinct(np.random.RandomState(0), n, k)
+        assert picks.dtype == np.int64
+        assert len(np.unique(picks)) == k
+        assert 0 <= picks.min() <= picks.max() < n
+        np.testing.assert_array_equal(_distinct(np.random.RandomState(0), n, k), picks)
+    assert not np.array_equal(np.sort(picks), picks)  # in random order
+    # every k-subset equally likely: each value is picked with probability k / n
+    counts = np.bincount(np.concatenate([_distinct(np.random.RandomState(seed), 10, 3) for seed in range(3000)]))
+    assert np.abs(counts / 3000 - 0.3).max() < 0.03
 
 
 def test_stream_inputs(data, tmp_path, monkeypatch):

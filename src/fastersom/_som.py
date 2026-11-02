@@ -347,6 +347,16 @@ def _nth_true(mask: np.ndarray, ranks: np.ndarray) -> np.ndarray:
     return positions
 
 
+def _distinct(rng: np.random.RandomState, n: int, k: int) -> np.ndarray:
+    """k distinct integers of range(n) in random order, by Floyd's algorithm in O(k) memory and time, for any n."""
+    picked: set[int] = set()
+    for j, t in enumerate(rng.randint(0, np.arange(n - k, n) + 1, dtype=np.int64).tolist(), n - k):
+        picked.add(j if t in picked else t)
+    picks = np.array(sorted(picked), dtype=np.int64)  # sorted, as a set's order is not part of the language
+    rng.shuffle(picks)
+    return picks
+
+
 class _Stream:
     """Samples kept on the host and read in batches of rows, as float32 tensors on the device (SOM(stream=True)).
 
@@ -589,11 +599,12 @@ class SOM:
         batch X[i:j] is converted to float32 and, on CUDA, read by a thread into one of two pinned 64 MB buffers and
         copied on a second CUDA stream while the previous batch is searched. fit reads X once more before the epochs,
         for the check that it is finite and, with deterministic=True, its range; init="pca" reads it twice more and
-        init="sample" reads its rows one by one. The map is that of the same batches without stream, bit for bit
-        wherever a fit is deterministic. fit sets no ``labels_``, an int64 per sample (call predict). predict copies
-        each batch's BMUs and distances to the host as they are found, and the error measures sum over each batch, so
-        that neither keeps anything per sample on the device; both raise for samples that are not finite only at the
-        end of their pass. Keyword only.
+        init="sample" reads its rows one by one, drawn otherwise than without stream (in host memory that does not
+        grow with n_samples), so that the two start from different samples for the same random_state. Otherwise the
+        map is that of the same batches without stream, bit for bit wherever a fit is deterministic. fit sets no
+        ``labels_``, an int64 per sample (call predict). predict copies each batch's BMUs and distances to the host as
+        they are found, and the error measures sum over each batch, so that neither keeps anything per sample on the
+        device; both raise for samples that are not finite only at the end of their pass. Keyword only.
 
     Attributes
     ----------
@@ -890,10 +901,12 @@ class SOM:
             n_candidates = len(data) if data.has_bmu is None else int(data.has_bmu.sum())
         if n_candidates == 0:
             raise ValueError(f"init='sample' with metric={self.metric!r} needs at least one sample with a BMU")
-        picks = rng.choice(n_candidates, n_nodes, replace=n_candidates < n_nodes)
-        if isinstance(data, _Stream):
-            return data.rows(picks if data.has_bmu is None else _nth_true(data.has_bmu, picks))
-        return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
+        if isinstance(data, torch.Tensor):
+            picks = rng.choice(n_candidates, n_nodes, replace=n_candidates < n_nodes)
+            return data[candidates[torch.as_tensor(picks, device=self._device)]].clone()
+        # choice without replacement would permute all candidates, 8 bytes each on the host
+        picks = rng.choice(n_candidates, n_nodes) if n_candidates < n_nodes else _distinct(rng, n_candidates, n_nodes)
+        return data.rows(picks if data.has_bmu is None else _nth_true(data.has_bmu, picks))
 
     def _pca_weights(self, data: torch.Tensor | _Stream) -> torch.Tensor:
         """Linear initialisation: the grid in the plane of the first two principal components (see init).
