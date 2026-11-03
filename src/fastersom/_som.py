@@ -1167,29 +1167,18 @@ class SOM:
             parts = ((b,) if d is None else (b, d) for b, d in found)
             _to_host(parts, (bmu,) if distance is None else (bmu, distance))
             return bmu, distance
-        bmus, distances = [], []
-        for b, d in found:
-            bmus.append(b)
-            if d is not None:
-                distances.append(d)
-        bmu = torch.cat(bmus)
-        distance = torch.cat(distances) if return_distance else None
-        has_bmu = self._has_bmu(data)  # of all samples at once
-        if has_bmu is not None:
-            bmu[~has_bmu] = -1
-            if distance is not None:
-                distance[~has_bmu] = torch.nan
-        return bmu, distance
+        batches = list(found)
+        distance = torch.cat([d for _, d in batches if d is not None]) if return_distance else None
+        return torch.cat([b for b, _ in batches]), distance
 
     def _batch_bmus(
         self, data: torch.Tensor | _Stream, weights: torch.Tensor, return_distance: bool
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor | None]]:
-        """Per batch, the BMUs and, if return_distance, distances of _bmus, streamed already -1 and NaN without one."""
-        streamed = isinstance(data, _Stream)
+        """Per batch, the BMUs and, if return_distance, distances of _bmus, -1 and NaN for samples without a BMU."""
         kernel = self._kernel(data.shape[1])
         search = self._search(weights, kernel)
         nodes = self._operands(weights)[0] if return_distance and self.metric in ("cosine", "correlation") else None
-        for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel, streamed)):
+        for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel, isinstance(data, _Stream))):
             bmu, distance = search(batch), None
             if return_distance:
                 # from the BMUs' weights, not the search's scores: for euclidean exact, so large offsets do not
@@ -1202,7 +1191,7 @@ class SOM:
                     assert nodes is not None
                     score = (self._centre(batch) * nodes[bmu]).sum(1, keepdim=True)
                     distance = self._score_distances(batch, score)[:, 0]
-            keep = self._has_bmu(batch) if streamed else None
+            keep = self._has_bmu(batch)
             if keep is not None:  # by torch.where, as indexing by a mask waits for the GPU
                 bmu = torch.where(keep, bmu, -1)
                 if distance is not None:
