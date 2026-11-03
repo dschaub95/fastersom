@@ -1530,16 +1530,18 @@ class SOM:
         self._check_fitted()
         if batch_size is not None and not _is_int(batch_size, 1):
             raise ValueError(f"batch_size must be None or an integer >= 1, got {batch_size!r}")
-        return self._transform_batches(self._check_X(X), batch_size)  # checked now, not at the first batch
+        batches = self._transform_batches(self._check_X(X), batch_size)  # checked now, not at the first batch
+        return ((start, distances.cpu().numpy()) for start, distances in batches)
 
     def _transform_batches(
         self, data: torch.Tensor | _Stream, batch_size: int | None = None
-    ) -> Iterator[tuple[int, np.ndarray]]:
+    ) -> Iterator[tuple[int, torch.Tensor]]:
+        """The distances of transform_batches, on the device."""
         if batch_size is None:
             batch_size = self._batch_size_for(data.shape[1], None, isinstance(data, _Stream))
         start = 0
         for batch in self._batches(data, batch_size):
-            yield start, self._distances(batch).cpu().numpy()
+            yield start, self._distances(batch)
             start += len(batch)
 
     @overload
@@ -1558,14 +1560,14 @@ class SOM:
         """
         self._check_fitted()
         data = self._check_X(X)
-        shape = (len(data), len(self._weights))
-        if out is None:
-            out = np.empty(shape, dtype=np.float32)
+        shape, host = (len(data), len(self._weights)), out is None
+        if host:  # a tensor, into which each batch is copied straight from the device
+            out = torch.empty(shape, dtype=torch.float32, device="cpu")
         elif tuple(getattr(out, "shape", ())) != shape:
             raise ValueError(f"out must have shape {shape}, got {getattr(out, 'shape', None)}")
         for start, distances in self._transform_batches(data):
-            out[start : start + len(distances)] = distances
-        return out
+            out[start : start + len(distances)] = distances if host else distances.cpu().numpy()
+        return out.numpy() if host else out
 
     @overload
     def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, *, out: None = None) -> np.ndarray: ...
