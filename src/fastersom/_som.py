@@ -1560,8 +1560,8 @@ class SOM:
 
         Distances in the metric; 1 for samples without a BMU. Without out, a dense n_samples x n_nodes float32 array
         on the host. out, a writable array of shape (n_samples, n_nodes) that takes ``out[i:j] = rows``, such as a
-        numpy array or memmap, an h5py or zarr dataset or a tensor on any device, receives the distances of each batch of transform_batches
-        instead, and is returned, so that with a memmap or dataset they need not fit in memory.
+        numpy array or memmap, an h5py or zarr dataset or a tensor on any device, receives the distances of each batch
+        of transform_batches instead, and is returned, so that with a memmap or dataset they need not fit in memory.
         """
         self._check_fitted()
         data = self._check_X(X)
