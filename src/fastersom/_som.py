@@ -1615,6 +1615,9 @@ class SOM:
         self._check_fitted()
         data = self._check_X(X)
         if len(self._weights) < 2:
+            if isinstance(data, _Stream):  # read all the same, for the check that X is finite
+                for _ in data.batches(self._batch_size_for(data.shape[1], None, True)):
+                    pass
             return 0.0
         kernel = self._kernel(data.shape[1], top2=True)
         search = self._search(self._weights, kernel, top2=True)

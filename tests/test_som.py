@@ -1344,6 +1344,10 @@ def test_stream_predict_input_validation(data, tmp_path):
             method(bad)
         with pytest.raises(ValueError, match="features"):
             method(data[:, :3])
+    single = SOM.from_weights(som.weights_[:1], 1, 1, device=CPU, stream=True)
+    with pytest.raises(ValueError, match="NaN"):  # read, though the error of one node is 0
+        single.topographic_error(bad)
+    assert single.topographic_error(data) == 0.0
 
 
 def test_stream_auto(data, tmp_path):
