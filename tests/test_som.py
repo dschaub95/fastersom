@@ -1535,6 +1535,17 @@ def test_stream_cuda_batches_bounded(data):
     assert peak <= 2 * 256 * 6 * 4 + 4096  # and the extremes of the first pass
 
 
+@pytest.mark.parametrize("init", ["random", "sample"])
+def test_stream_scan_batch_size(data, monkeypatch, init):
+    # the first pass reads batches of batch_size at most, as the epochs do off the CPU
+    from fastersom._som import _Stream
+
+    sizes, batches = [], _Stream.batches
+    monkeypatch.setattr(_Stream, "batches", lambda self, size: sizes.append(size) or batches(self, size))
+    SOM(**{**STREAM_KWARGS, "batch_size": 100}, init=init, metric="cosine", device=CPU, stream=True).fit(data)
+    assert sizes[0] == 100
+
+
 def test_nth_true():
     from fastersom._som import _nth_true
 

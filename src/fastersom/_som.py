@@ -840,7 +840,9 @@ class SOM:
         """
         sample = isinstance(self.init, str) and self.init == "sample"
         masks = []
-        for batch in data.batches(max(1, (1 << 24) // data.shape[1])):
+        # within the epochs' batches, which this pass's exact results do not depend on
+        batch_size = min(max(1, (1 << 24) // data.shape[1]), self._batch_size_for(data.shape[1], None, True))
+        for batch in data.batches(batch_size):
             keep = self._has_bmu(batch) if sample else None
             if keep is not None:
                 masks.append(keep.cpu().numpy())
