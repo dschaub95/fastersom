@@ -34,7 +34,7 @@ from functools import cache
 from math import ceil, floor, isfinite, prod
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import numpy as np
 import torch
@@ -357,8 +357,34 @@ def _distinct(rng: np.random.RandomState, n: int, k: int) -> np.ndarray:
     return picks
 
 
+# what marks X as in memory, and so not streamed under stream="auto", besides being a numpy array or a tensor: an array
+# that exports its buffer (__array_interface__), a CUDA array (__cuda_array_interface__, or DLPack as CuPy's and JAX's,
+# which _as_tensor takes without leaving the GPU) or a data frame (the interchange protocol of polars and pyarrow)
+_IN_MEMORY = ("__array_interface__", "__cuda_array_interface__", "__dlpack__", "__dataframe__")
+
+
+def _out_of_core(X: Any) -> bool:
+    """Return whether stream="auto" streams X: a numpy memmap, or anything else with a shape that is not in memory.
+
+    Decided by the type of X alone, never by its size against the free memory, which would make the map depend on the
+    machine. Numpy arrays other than memmaps, tensors on any device, the arrays and data frames of _IN_MEMORY, pandas
+    objects and anything without a shape (a list) are in memory anyway; h5py and zarr datasets or dask arrays, which
+    have a shape and none of these, stream without fastersom importing their libraries.
+    """
+    if isinstance(X, np.memmap):  # which np.load(..., mmap_mode="r") returns
+        return True
+    if isinstance(X, np.ndarray | torch.Tensor) or type(X).__module__.partition(".")[0] == "pandas":
+        return False
+    return hasattr(X, "shape") and not any(hasattr(X, name) for name in _IN_MEMORY)
+
+
+def _type_name(X: Any) -> str:
+    """The type of X by its top-level package, such as numpy.memmap or h5py.Dataset."""
+    return f"{type(X).__module__.partition('.')[0]}.{type(X).__name__}"
+
+
 class _Stream:
-    """Samples kept on the host and read in batches of rows, as float32 tensors on the device (SOM(stream=True)).
+    """Samples kept on the host and read in batches of rows, as float32 tensors on the device (see SOM's stream).
 
     X is anything with a shape (n_samples, n_features) whose row slices are numpy arrays or tensors, such as a numpy
     memmap, an h5py or zarr dataset or a CPU tensor. The first full pass over the batches finds the per-feature minimum
@@ -388,8 +414,9 @@ class _Stream:
         rows = self.X[start:stop]
         if isinstance(rows, torch.Tensor):
             buffer[: stop - start].copy_(rows.detach())
-        else:  # converted while copied, as torch.as_tensor(X, dtype=torch.float32) does
-            np.copyto(buffer[: stop - start].numpy(), rows, casting="unsafe")
+        else:  # converted while copied, as torch.as_tensor(X, dtype=torch.float32) does; np.asarray computes lazy
+            # slices such as dask's, which np.copyto would hand back to their library
+            np.copyto(buffer[: stop - start].numpy(), np.asarray(rows), casting="unsafe")
 
     def _pipelined(self, batch_size: int) -> Iterator[torch.Tensor]:
         """The batches on CUDA, read by a thread into two pinned buffers in turn and copied on a side stream.
@@ -593,25 +620,30 @@ class SOM:
         width schedule of fastersom 0.7.0, and to ``"last_epoch"`` under the others. Keyword only.
     stream
         Whether fit, predict, transform and the error measures read X from the host batch by batch rather than copy
-        all of it to the device, for data beyond the device's memory (or, from a memmap, the CPU's). X can then be
-        anything of shape (n_samples, n_features) whose row slices are arrays or tensors, such as a numpy memmap, an
-        h5py or zarr dataset or a CPU tensor, and of shape (..., n_features) a C-contiguous numpy array or tensor. Each
-        batch X[i:j] is converted to float32 and, on CUDA, read by a thread into one of two pinned 64 MB buffers and
-        copied on a second CUDA stream while the previous batch is searched. fit reads X once more before the epochs,
-        for the check that it is finite and, with deterministic=True, its range; init="pca" reads it twice more and
-        init="sample" reads its rows one by one, drawn otherwise than without stream (in host memory that does not
-        grow with n_samples), so that the two start from different samples for the same random_state. Otherwise the
-        map is that of the same batches without stream, bit for bit wherever a fit is deterministic. fit sets no
-        ``labels_``, an int64 per sample (call predict). predict copies each batch's BMUs and distances to the host as
-        they are found, and the error measures sum over each batch, so that neither keeps anything per sample on the
-        device; both raise for samples that are not finite only at the end of their pass. Keyword only.
+        all of it to the device, for data beyond the device's memory (or, from a memmap, the CPU's). ``"auto"`` decides
+        per call by the type of X, never by its size, so that the map does not depend on the machine's free memory: a
+        numpy memmap (as np.load(..., mmap_mode="r") returns) and anything else with a shape that is not in memory,
+        such as an h5py or zarr dataset or a dask array, are streamed; numpy arrays, tensors on any device, DLPack
+        arrays such as CuPy's, pandas objects and lists are not. True and False stream always and never. Streamed, X
+        can be anything of shape (n_samples, n_features) whose row slices are arrays or tensors, such as a CPU tensor,
+        and of shape (..., n_features) a C-contiguous numpy array or tensor. Each batch X[i:j] is converted to float32
+        and, on CUDA, read by a thread into one of two pinned 64 MB buffers and copied on a second CUDA stream while the
+        previous batch is searched. fit reads X once more before the epochs, for the check that it is finite and, with
+        deterministic=True, its range; init="pca" reads it twice more and init="sample" reads its rows one by one, drawn
+        otherwise than in memory (in host memory that does not grow with n_samples), so that the two start from
+        different samples for the same random_state, as another random_state would: an equally good map, not the same
+        one. Otherwise the map is that of the same batches in memory, bit for bit wherever a fit is deterministic. fit
+        sets no ``labels_``, an int64 per sample (call predict). predict copies each batch's BMUs and distances to the
+        host as they are found, and the error measures sum over each batch, so that neither keeps anything per sample
+        on the device; both raise for samples that are not finite only at the end of their pass. Keyword only.
 
     Attributes
     ----------
     weights_
         Node weights, shape (n_rows * n_cols, n_features), row-major (node = row * n_cols + col).
     labels_
-        BMU of every training sample under the final weights. Not set by from_weights, nor with stream=True.
+        BMU of every training sample under the final weights. Not set by from_weights, nor when fit streams X (see
+        stream), after which reading it raises an AttributeError that says so.
     n_features_in_
         Number of features seen in fit.
     """
@@ -638,7 +670,7 @@ class SOM:
         grid_metric: str = "euclidean",
         sigma_schedule: str | ArrayLike = "exponential",
         schedule_end: str | None = None,
-        stream: bool = False,
+        stream: bool | Literal["auto"] = "auto",
     ):
         self.n_rows = n_rows
         self.n_cols = n_cols
@@ -673,9 +705,22 @@ class SOM:
         som._set_weights(som._given_weights())
         return som
 
+    if not TYPE_CHECKING:  # hidden from type checkers, which would accept any attribute of a SOM otherwise
+
+        def __getattr__(self, name: str) -> Any:
+            """Raises for an attribute not set, saying why if it is the labels_ a streamed fit did not set."""
+            # rather than a labels_ property, which Sphinx would document twice, next to the docstring's Attributes
+            unlabelled = self.__dict__.get("_unlabelled") if name == "labels_" else None
+            if unlabelled is not None:
+                message = f"labels_ is not set when fit streams X ({unlabelled} here); call predict(X)"
+            else:
+                message = f"{type(self).__name__!r} object has no attribute {name!r}"
+            raise AttributeError(message, name=name, obj=self)
+
     def __getstate__(self) -> dict:
         """Keeps the parameters and numpy fitted attributes only, so the pickle does not depend on the device."""
-        state = {key: value for key, value in self.__dict__.items() if not key.startswith("_")}
+        # and why a streamed fit set no labels_
+        state = {key: value for key, value in self.__dict__.items() if not key.startswith("_") or key == "_unlabelled"}
         if isinstance(self.init, torch.Tensor):
             state["init"] = self.init.cpu()
         return state
@@ -691,7 +736,7 @@ class SOM:
         state.setdefault("grid_metric", "euclidean")
         state.setdefault("sigma_schedule", "exponential")
         state.setdefault("schedule_end", None)
-        state.setdefault("stream", False)
+        state.setdefault("stream", False)  # which never streamed, unlike the default "auto"
         self.__dict__.update(state)
         if hasattr(self, "weights_"):
             self._setup(fall_back=True)
@@ -711,6 +756,7 @@ class SOM:
             raise ValueError(f"batch_size must be None or an integer >= 1, got {self.batch_size!r}")
         if self.memory_fraction is not None and not 0 < self.memory_fraction <= 1:
             raise ValueError(f"memory_fraction must be None or in (0, 1], got {self.memory_fraction!r}")
+        self._check_stream()
         self._device = torch.device(self.device) if self.device is not None else _default_device()
         if fall_back and not _is_available(self._device):
             self._device = _default_device()
@@ -733,8 +779,17 @@ class SOM:
             X = np.ascontiguousarray(X)
         return torch.as_tensor(X, dtype=torch.float32, device=self._device)
 
+    def _streams(self, X: Any) -> bool:
+        """Whether this call streams X (see stream), validating stream."""
+        self._check_stream()  # again, as stream may have been set since _setup
+        return self.stream if isinstance(self.stream, bool) else _out_of_core(X)
+
+    def _check_stream(self) -> None:
+        if not isinstance(self.stream, bool) and not (isinstance(self.stream, str) and self.stream == "auto"):
+            raise ValueError(f"stream must be 'auto', True or False, got {self.stream!r}")
+
     def _check_X(self, X: ArrayLike | torch.Tensor) -> torch.Tensor | _Stream:
-        if self.stream:
+        if self._streams(X):
             return self._source(X)
         data = self._as_tensor(X)
         if data.ndim < 2 or data.numel() == 0:
@@ -747,7 +802,7 @@ class SOM:
         return data
 
     def _source(self, X: Any) -> _Stream:
-        """X for stream=True, kept on the host, with the checks of _check_X (that it is finite in the first pass)."""
+        """X streamed, kept on the host, with the checks of _check_X (that it is finite in the first pass)."""
         if not hasattr(X, "shape"):  # e.g. a list, in memory anyway
             X = np.asarray(X)
         shape = tuple(X.shape)
@@ -759,8 +814,8 @@ class SOM:
                 isinstance(X, torch.Tensor) and X.is_contiguous()
             ):
                 raise ValueError(
-                    f"with stream=True, X must have shape (n_samples, n_features) or be a C-contiguous numpy array or "
-                    f"tensor, got shape {shape}"
+                    f"streamed, X must have shape (n_samples, n_features) or be a C-contiguous numpy array or tensor, "
+                    f"got shape {shape}; pass stream=False to read it into memory"
                 )
             X = X.reshape(-1, shape[-1])
         if hasattr(self, "n_features_in_") and shape[-1] != self.n_features_in_:
@@ -806,8 +861,8 @@ class SOM:
             kernels += ["float32"] if manhattan or n_features <= _FUSED_MAX_FEATURES else []
         return next((k for k in kernels if _works(self._device, k, n_features, self.metric, top2)), None)
 
-    def _batch_size_for(self, n_features: int, kernel: str | None) -> int:
-        """kernel: the fused kernel of the BMU search, if any, which holds no scores."""
+    def _batch_size_for(self, n_features: int, kernel: str | None, streamed: bool = False) -> int:
+        """kernel: the fused kernel of the BMU search, if any, which holds no scores; streamed: whether X is."""
         if self.batch_size is not None:
             return self.batch_size
         if self._device.type == "cuda":
@@ -835,8 +890,8 @@ class SOM:
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
-        # stream=True holds the next batch, and the last one until the search has read it, besides the searched one
-        copies = 8 * n_features if self.stream else 0
+        # streamed X holds the next batch, and the last one until the search has read it, besides the searched one
+        copies = 8 * n_features if streamed else 0
         if kernel is not None:
             # no scores in memory, only up to about 4 copies of the batch (transposed or as two TF32 parts, centred,
             # with the samples without a BMU zeroed, their BMUs' weights), the TF32 parts' features padded to a
@@ -1126,7 +1181,7 @@ class SOM:
         kernel = self._kernel(data.shape[1])
         search = self._search(weights, kernel)
         nodes = self._operands(weights)[0] if return_distance and self.metric in ("cosine", "correlation") else None
-        for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel)):
+        for batch in self._batches(data, self._batch_size_for(data.shape[1], kernel, streamed)):
             bmu, distance = search(batch), None
             if return_distance:
                 # from the BMUs' weights, not the search's scores: for euclidean exact, so large offsets do not
@@ -1315,7 +1370,7 @@ class SOM:
         X
             Samples, shape (n_samples, n_features) or (..., n_features); numpy array, array-like, torch tensor
             or DLPack array such as CuPy. Any real values are fine; data is copied to the device once and stays
-            there, or with stream=True read from the host in every epoch (see stream).
+            there, or streamed read from the host in every epoch (see stream).
         y
             Ignored.
 
@@ -1325,7 +1380,7 @@ class SOM:
             The fitted map.
         """
         self._setup()
-        for attr in ("weights_", "labels_", "n_features_in_"):
+        for attr in ("weights_", "labels_", "n_features_in_", "_unlabelled"):
             self.__dict__.pop(attr, None)
         data = self._check_X(X)
         if isinstance(data, _Stream):
@@ -1357,7 +1412,7 @@ class SOM:
         # second word adds the rounding remainders, exact in float64, scaled by 2^(62 - log2(n_samples)), so that values
         # are lost only below about n_samples^2 * 2^-124 of the largest
         fixed_point = deterministic and (not mps or kernel in _METAL)
-        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data.shape[1], kernel)
+        n_nodes, batch_size = weights.shape[0], self._batch_size_for(data.shape[1], kernel, isinstance(data, _Stream))
         if fixed_point:
             assert magnitude is not None
             low_shift = 62 - len(data).bit_length()  # remainders within +-0.5, so their sums below 2^61
@@ -1415,8 +1470,10 @@ class SOM:
             if self.verbose:  # the epoch's work is only queued on GPUs, so the bar would run ahead without waiting
                 _synchronize(self._device)
         self._set_weights(weights)
-        if isinstance(data, torch.Tensor):  # not when streamed, as an int64 per sample can exceed memory too
+        if isinstance(data, torch.Tensor):
             self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
+        else:  # not when streamed, as an int64 per sample can exceed memory too; labels_ then raises saying why
+            self._unlabelled = "stream=True" if self.stream is True else f"a {_type_name(X)}"
         return self
 
     @overload
@@ -1451,8 +1508,9 @@ class SOM:
         return bmus.cpu().numpy(), distances.cpu().numpy()
 
     def fit_predict(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
-        """Fits the map and returns ``labels_`` (with stream=True, which sets none, predict(X))."""
-        return self.fit(X).predict(X) if self.stream else self.fit(X).labels_
+        """Fits the map and returns ``labels_`` (predict(X) if fit streams X, which sets none)."""
+        self.fit(X)
+        return self.labels_ if "labels_" in self.__dict__ else self.predict(X)
 
     def _distances(self, batch: torch.Tensor) -> torch.Tensor:
         if self.metric == "euclidean":  # exact, unlike the BMU search, so large offsets do not cancel
@@ -1463,24 +1521,64 @@ class SOM:
             distances[~has_bmu] = 1
         return distances
 
-    def transform(self, X: ArrayLike | torch.Tensor) -> np.ndarray:
+    def transform_batches(
+        self, X: ArrayLike | torch.Tensor, batch_size: int | None = None
+    ) -> Iterator[tuple[int, np.ndarray]]:
+        """Yields the distances of transform batch by batch, as ``(start, distances)``.
+
+        distances holds those of samples start to start + len(distances) to every node, a float32 numpy array of shape
+        (rows, n_nodes) on the host, so that only one batch's are in memory at a time; X is checked, and streamed or
+        not (see stream), as by transform. batch_size defaults to transform's.
+        """
+        self._check_fitted()
+        if batch_size is not None and not _is_int(batch_size, 1):
+            raise ValueError(f"batch_size must be None or an integer >= 1, got {batch_size!r}")
+        return self._transform_batches(self._check_X(X), batch_size)  # checked now, not at the first batch
+
+    def _transform_batches(
+        self, data: torch.Tensor | _Stream, batch_size: int | None = None
+    ) -> Iterator[tuple[int, np.ndarray]]:
+        if batch_size is None:
+            batch_size = self._batch_size_for(data.shape[1], None, isinstance(data, _Stream))
+        start = 0
+        for batch in self._batches(data, batch_size):
+            yield start, self._distances(batch).cpu().numpy()
+            start += len(batch)
+
+    @overload
+    def transform(self, X: ArrayLike | torch.Tensor, out: None = None) -> np.ndarray: ...
+
+    @overload
+    def transform[T](self, X: ArrayLike | torch.Tensor, out: T) -> T: ...
+
+    def transform(self, X: ArrayLike | torch.Tensor, out: Any = None) -> Any:
         """Returns the distance of every sample to every node, shape (n_samples, n_nodes).
 
-        Distances in the metric; 1 for samples without a BMU. The output is a dense n_samples x n_nodes float32
-        array; for large inputs call it on slices or use predict.
+        Distances in the metric; 1 for samples without a BMU. Without out, a dense n_samples x n_nodes float32 array
+        on the host. out, a writable array of shape (n_samples, n_nodes) that takes ``out[i:j] = rows``, such as a
+        numpy array or memmap or an h5py or zarr dataset, receives the distances of each batch of transform_batches
+        instead, and is returned, so that with a memmap or dataset they need not fit in memory.
         """
         self._check_fitted()
         data = self._check_X(X)
-        batch_size = self._batch_size_for(data.shape[1], None)
-        # on the CPU, as it can exceed device memory
-        distances = torch.empty(len(data), len(self._weights), dtype=torch.float32, device="cpu")
-        for batch, rows in zip(self._batches(data, batch_size), distances.split(batch_size), strict=True):
-            rows.copy_(self._distances(batch))
-        return distances.numpy()
+        shape = (len(data), len(self._weights))
+        if out is None:
+            out = np.empty(shape, dtype=np.float32)
+        elif tuple(getattr(out, "shape", ())) != shape:
+            raise ValueError(f"out must have shape {shape}, got {getattr(out, 'shape', None)}")
+        for start, distances in self._transform_batches(data):
+            out[start : start + len(distances)] = distances
+        return out
 
-    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None) -> np.ndarray:
-        """Fits the map and returns transform(X)."""
-        return self.fit(X).transform(X)
+    @overload
+    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, out: None = None) -> np.ndarray: ...
+
+    @overload
+    def fit_transform[T](self, X: ArrayLike | torch.Tensor, y: object = None, *, out: T) -> T: ...
+
+    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, out: Any = None) -> Any:
+        """Fits the map and returns transform(X, out)."""
+        return self.fit(X).transform(X, out)
 
     def quantization_error(self, X: ArrayLike | torch.Tensor) -> float:
         """Mean distance (in the metric) between each sample with a BMU and its BMU."""
@@ -1516,7 +1614,7 @@ class SOM:
                 data = data[has_bmu]
         kernel = self._kernel(data.shape[1], top2=True)
         search = self._search(self._weights, kernel, top2=True)
-        batch_size = self._batch_size_for(data.shape[1], kernel)
+        batch_size = self._batch_size_for(data.shape[1], kernel, isinstance(data, _Stream))
         if isinstance(data, torch.Tensor):
             nodes = torch.cat([search(batch) for batch in self._batches(data, batch_size)])
             offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)

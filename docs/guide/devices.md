@@ -19,19 +19,25 @@ that is available, else to the default one, so a map fitted on a GPU loads on a 
 
 ## Data larger than the device's memory
 
-With `stream=True`, `X` stays on the host and every epoch reads it batch by batch, so that only a few batches are on
-the device at a time. The batch update needs no more than that: each epoch adds the batches into per-node sums and
-counts, whose size does not depend on the number of samples.
+Streamed, `X` stays on the host and every epoch reads it batch by batch, so that only a few batches are on the device
+at a time. The batch update needs no more than that: each epoch adds the batches into per-node sums and counts, whose
+size does not depend on the number of samples.
 
 ```python
 import numpy as np
 from fastersom import SOM
 
-X = np.load("X.npy", mmap_mode="r")  # on disk, read as needed
-som = SOM(30, 30, stream=True).fit(X)
+X = np.load("X.npy", mmap_mode="r")  # on disk, read as needed, and so streamed
+som = SOM(30, 30).fit(X)
 labels = som.predict(X)
 ```
 
+- With `stream="auto"` (the default), `fit`, `predict`, `transform` and the error measures decide on every call by
+  the type of `X`, never by its size, so that the map does not depend on how much memory the machine has free. A
+  NumPy memmap (what `np.load(..., mmap_mode="r")` returns) is streamed, as is anything else with a `shape` that is
+  not in memory, such as an h5py or zarr dataset or a dask array. NumPy arrays, torch tensors on any device, DLPack
+  arrays such as CuPy's, pandas objects and lists are in memory anyway and are copied to the device as before.
+  `stream=True` streams any `X`, a CPU tensor say, and `stream=False` copies any `X` to the device, a memmap included.
 - `X` can be anything of shape `(n_samples, n_features)` whose row slices `X[i:j]` are NumPy arrays or torch tensors:
   a NumPy array or memmap, an h5py or zarr dataset, or a CPU tensor. fastersom reads nothing but such slices, and needs
   neither h5py nor zarr itself. Inputs of shape `(..., n_features)` are flattened only as C-contiguous NumPy arrays or
@@ -47,12 +53,25 @@ labels = som.predict(X)
   deterministic (on the CPU, and with `deterministic=True`). Pass an explicit `batch_size` to compare the two, as the
   default depends on the free memory. `init="sample"` is the exception: streamed, it draws its rows otherwise, in host
   memory that does not grow with the number of samples, so that the two start from different samples for the same
-  `random_state`.
-- `fit` does not set `labels_`, which would hold an int64 per sample; `predict(X)` returns them, and `fit_predict`
-  calls it. `predict`, `transform` and the error measures read `X` once, and raise for values that are not finite only
+  `random_state`, as two values of `random_state` do: rows drawn from the same distribution, an equally good map, not
+  the same one.
+- `fit` does not set `labels_`, which would hold an int64 per sample and take another pass over `X` under the final
+  weights; reading it raises an `AttributeError` that says so (`hasattr(som, "labels_")` is False), until a fit in
+  memory sets it again. `predict(X)` returns them, and `fit_predict` calls it. `predict`, `transform` and the error measures read `X` once, and raise for values that are not finite only
   at the end of that pass. `predict` copies each batch's BMUs and distances (12 bytes per sample) to the host as they
   are found, on CUDA through pinned memory without waiting for each copy, and the error measures sum over each batch,
   so that the device holds nothing per sample.
+- `transform` returns a dense `n_samples x n_nodes` float32 array on the host. `transform(X, out=D)` writes the
+  distances batch by batch into `D` instead, any writable array of that shape that takes `D[i:j] = rows`, such as a
+  memmap or an h5py or zarr dataset, and `transform_batches(X)` yields them as `(start, distances)` per batch, for
+  whatever else is to be done with them:
+
+  ```python
+  D = np.lib.format.open_memmap("D.npy", mode="w+", dtype=np.float32, shape=(len(X), 30 * 30))
+  som.transform(X, out=D)
+  for start, distances in som.transform_batches(X):
+      ...  # distances of samples start to start + len(distances), shape (len(distances), 900)
+  ```
 
 The streamed fit is bound by reading the data rather than by the search. On an A100, a 32 x 32 map on 20 million
 samples x 50 features (4 GB) in float32, from a memmap in the page cache, took 0.33 s per epoch, about 12 GB/s, against

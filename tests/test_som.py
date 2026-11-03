@@ -214,9 +214,13 @@ def test_invalid_parameters(data):
         ({"sigma_initial": b"2.5"}, "sigma_initial"),
         ({"sigma_schedule": ["wide"]}, "sigma_schedule"),
         ({"sigma_schedule": (sigma for sigma in [1.0])}, "sigma_schedule"),
+        ({"stream": "always"}, "stream"),
+        ({"stream": 1}, "stream"),
     ]:
         with pytest.raises(ValueError, match=match):
             SOM(**{"n_rows": 5, "n_cols": 4, **kwargs}, device=CPU).fit(data)
+    with pytest.raises(ValueError, match="stream"):  # before any data, unlike the stream checked per call
+        SOM.from_weights(np.zeros((20, 3)), 5, 4, stream="always", device=CPU)
 
 
 @pytest.mark.parametrize("metric", METRICS)
@@ -655,6 +659,7 @@ def test_pickle_round_trip(data, monkeypatch):
         del state[key]
     loaded = SOM.__new__(SOM)
     loaded.__setstate__(state)
+    assert loaded.stream is False  # which never streamed
     np.testing.assert_array_equal(loaded.predict(data), labels)
 
     # a map configured for a device the loading machine lacks falls back to the default device
@@ -1339,6 +1344,119 @@ def test_stream_predict_input_validation(data, tmp_path):
             method(bad)
         with pytest.raises(ValueError, match="features"):
             method(data[:, :3])
+
+
+def test_stream_auto(data, tmp_path):
+    from fastersom._som import _out_of_core, _Stream
+
+    path = tmp_path / "X.npy"
+    np.save(path, data)
+    memmap = np.load(path, mmap_mode="r")
+    for X in (data, torch.from_numpy(data), data.tolist(), np.asarray(memmap)):  # in memory anyway
+        assert not _out_of_core(X)
+    for X in (memmap, memmap[100:], Rows(data)):  # with a shape and slicing, not in memory
+        assert _out_of_core(X)
+    expected = SOM(**STREAM_KWARGS, device=CPU).fit(data)
+    for X in (torch.from_numpy(data), data.tolist()):
+        som = SOM(**STREAM_KWARGS, device=CPU).fit(X)
+        assert som.stream == "auto"
+        np.testing.assert_array_equal(som.weights_, expected.weights_)
+        np.testing.assert_array_equal(som.labels_, expected.labels_)
+    for X in (memmap, Rows(data)):  # streamed: the same map, without labels_
+        som = SOM(**STREAM_KWARGS, device=CPU).fit(X)
+        np.testing.assert_array_equal(som.weights_, expected.weights_)
+        assert not hasattr(som, "labels_")
+        np.testing.assert_array_equal(som.fit_predict(X), expected.labels_)
+        np.testing.assert_array_equal(som.transform(X), expected.transform(data))
+    # decided per call, whatever fit streamed
+    assert isinstance(expected._check_X(memmap), _Stream)
+    assert isinstance(expected._check_X(data), torch.Tensor)
+    np.testing.assert_array_equal(expected.predict(memmap), expected.labels_)
+    assert expected.quantization_error(memmap) == expected.quantization_error(data)
+    # True and False force it
+    som = SOM(**STREAM_KWARGS, device=CPU, stream=False)
+    memmap = np.load(path, mmap_mode="c")  # writable, as torch warns about sharing a read-only array on the CPU
+    np.testing.assert_array_equal(som.fit(memmap).labels_, expected.labels_)
+    assert isinstance(som._check_X(memmap), torch.Tensor)
+    som = SOM(**STREAM_KWARGS, device=CPU, stream=True)
+    np.testing.assert_array_equal(som.fit(data).weights_, expected.weights_)
+    assert not hasattr(som, "labels_")
+    assert isinstance(som._check_X(data), _Stream)
+
+
+def test_stream_labels(data, tmp_path):
+    path = tmp_path / "X.npy"
+    np.save(path, data)
+    memmap = np.load(path, mmap_mode="r")
+    labels = SOM(**STREAM_KWARGS, device=CPU).fit(data).labels_
+    som = SOM(**STREAM_KWARGS, device=CPU).fit(memmap)
+    assert not hasattr(som, "labels_")
+    message = r"labels_ is not set when fit streams X \(a numpy.memmap here\); call predict\(X\)"
+    with pytest.raises(AttributeError, match=message):
+        _ = som.labels_
+    with pytest.raises(AttributeError, match=message):  # also once pickled
+        _ = pickle.loads(pickle.dumps(som)).labels_
+    with pytest.raises(AttributeError, match=r"\(stream=True here\)"):
+        _ = SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(data).labels_
+    with pytest.raises(AttributeError, match="has no attribute 'labels_'"):  # not fitted from data
+        _ = SOM.from_weights(som.weights_, 6, 5, device=CPU).labels_
+    # a fit in memory sets them again, and a streamed one drops them
+    np.testing.assert_array_equal(som.fit(data).labels_, labels)
+    np.testing.assert_array_equal(pickle.loads(pickle.dumps(som)).labels_, labels)
+    assert not hasattr(som.fit(memmap), "labels_")
+    np.testing.assert_array_equal(som.weights_, pickle.loads(pickle.dumps(som)).weights_)
+    # fitted attributes as scikit-learn's check_is_fitted finds them, in vars()
+    assert sorted(key for key in vars(som) if key.endswith("_")) == ["n_features_in_", "weights_"]
+    assert "labels_" in vars(som.fit(data))
+
+
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("metric", METRICS)
+def test_transform_batches_and_out(data, tmp_path, device, metric):
+    X = data.copy()
+    X[::10] = 0  # without a BMU under cosine and correlation
+    som = SOM(**STREAM_KWARGS, metric=metric, device=device).fit(X)
+    expected = som.transform(X)
+    batches = list(som.transform_batches(X))  # of batch_size 512, as transform's
+    assert [start for start, _ in batches] == list(range(0, 5000, 512))
+    for _, distances in batches:
+        assert isinstance(distances, np.ndarray)
+        assert distances.dtype == np.float32
+    np.testing.assert_array_equal(np.concatenate([distances for _, distances in batches]), expected)
+    starts, parts = zip(*som.transform_batches(X, batch_size=700), strict=True)
+    assert starts == tuple(range(0, 5000, 700))
+    np.testing.assert_allclose(np.concatenate(parts), expected, atol=1e-5)
+    path = tmp_path / "X.npy"
+    np.save(path, X)
+    memmap = np.load(path, mmap_mode="r")  # streamed
+    np.testing.assert_array_equal(
+        np.concatenate([distances for _, distances in som.transform_batches(memmap)]), expected
+    )
+    out = np.lib.format.open_memmap(tmp_path / "D.npy", mode="w+", dtype=np.float32, shape=expected.shape)
+    assert som.transform(memmap, out=out) is out
+    np.testing.assert_array_equal(out, expected)
+    out = np.zeros(expected.shape)  # converted as written
+    assert som.transform(X, out) is out
+    np.testing.assert_array_equal(out, expected)
+    out = np.zeros(expected.shape, dtype=np.float32)
+    fitted = SOM(**STREAM_KWARGS, metric=metric, device=device)
+    assert fitted.fit_transform(X, out=out) is out
+    np.testing.assert_array_equal(out, fitted.transform(X))
+
+
+def test_transform_batches_and_out_validation(data):
+    som = SOM(**STREAM_KWARGS, device=CPU)
+    with pytest.raises(RuntimeError, match="not fitted"):  # when called, before the first batch
+        som.transform_batches(data)
+    som.fit(data)
+    for batch_size in (0, 1.5):
+        with pytest.raises(ValueError, match="batch_size"):
+            som.transform_batches(data, batch_size)
+    with pytest.raises(ValueError, match="features"):
+        som.transform_batches(data[:, :3])
+    for out in (np.zeros((5000, 29)), np.zeros(5000 * 30), [[0.0] * 30] * 5000):
+        with pytest.raises(ValueError, match=r"out must have shape \(5000, 30\)"):
+            som.transform(data, out=out)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
