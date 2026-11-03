@@ -1446,6 +1446,10 @@ def test_transform_batches_and_out(data, tmp_path, device, metric):
     fitted = SOM(**STREAM_KWARGS, metric=metric, device=device)
     assert fitted.fit_transform(X, out=out) is out
     np.testing.assert_array_equal(out, fitted.transform(X))
+    for target in {CPU, device}:  # a tensor, on its own device
+        out = torch.empty(expected.shape, device=target)
+        assert som.transform(X, out=out) is out
+        np.testing.assert_array_equal(out.cpu().numpy(), expected)
 
 
 def test_transform_batches_and_out_validation(data):

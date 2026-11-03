@@ -63,7 +63,7 @@ labels = som.predict(X)
   so that the device holds nothing per sample.
 - `transform` returns a dense `n_samples x n_nodes` float32 array on the host. `transform(X, out=D)` writes the
   distances batch by batch into `D` instead, any writable array of that shape that takes `D[i:j] = rows`, such as a
-  memmap or an h5py or zarr dataset, and `transform_batches(X)` yields them as `(start, distances)` per batch, for
+  memmap, an h5py or zarr dataset or a tensor on any device, and `transform_batches(X)` yields them as `(start, distances)` per batch, for
   whatever else is to be done with them:
 
   ```python

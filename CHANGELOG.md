@@ -48,8 +48,8 @@
     call predict(X)", and `hasattr(som, "labels_")` is False.
   - `transform_batches(X, batch_size=None)` yields the distances of `transform` per batch as `(start, distances)`, a
     float32 array of shape `(rows, n_nodes)` on the host each, and `transform(X, out=D)` (and `fit_transform`) writes
-    them batch by batch into `D`, any writable array of shape `(n_samples, n_nodes)` such as a memmap or an h5py or
-    zarr dataset, so that they need not fit in memory either.
+    them batch by batch into `D`, any writable array of shape `(n_samples, n_nodes)` such as a memmap, an h5py or
+    zarr dataset or a tensor on any device, so that they need not fit in memory either.
   - Maps pickled by 0.7.0 load with `stream=False`, as they never streamed (issue #34).
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
