@@ -630,15 +630,16 @@ class SOM:
         arrays such as CuPy's, pandas objects and lists are not. True and False stream always and never. Streamed, X
         can be anything of shape (n_samples, n_features) whose row slices are arrays or tensors, such as a CPU tensor,
         and of shape (..., n_features) a C-contiguous numpy array or tensor. Each batch X[i:j] is converted to float32
-        and, on CUDA, read by a thread into one of two pinned 64 MB buffers and copied on a second CUDA stream while the
-        previous batch is searched. fit reads X once more before the epochs, for the check that it is finite and, with
-        deterministic=True, its range; init="pca" reads it twice more and init="sample" reads its rows one by one, drawn
-        otherwise than in memory (in host memory that does not grow with n_samples), so that the two start from
-        different samples for the same random_state, as another random_state would: an equally good map, not the same
-        one. Otherwise the map is that of the same batches in memory, bit for bit wherever a fit is deterministic. fit
-        sets no ``labels_``, an int64 per sample (call predict). predict copies each batch's BMUs and distances to the
-        host as they are found, and the error measures sum over each batch, so that neither keeps anything per sample
-        on the device; both raise for samples that are not finite only at the end of their pass. Keyword only.
+        and, on CUDA, read by a thread into one of two pinned buffers of up to 64 MB and copied on a second CUDA stream
+        while the previous batch is searched. fit reads X once more before the epochs, for the check that it is finite
+        and, with deterministic=True, its range; init="pca" reads it twice more and init="sample" reads its rows one by
+        one, drawn otherwise than in memory (in host memory that does not grow with n_samples, but for a byte per sample
+        under cosine and correlation), so that the two start from different samples for the same random_state, as
+        another random_state would: an equally good map, not the same one. Otherwise the map is that of the same batches
+        in memory, bit for bit wherever a fit is deterministic. fit sets no ``labels_``, an int64 per sample (call
+        predict). predict copies each batch's BMUs and distances to the host as they are found, and the error measures
+        sum over each batch, so that neither keeps anything per sample on the device; both raise for samples that are
+        not finite only at the end of their pass. Keyword only.
 
     Attributes
     ----------
@@ -893,7 +894,7 @@ class SOM:
         else:
             return 1 << 16
         fraction = fraction if self.memory_fraction is None else self.memory_fraction
-        # streamed X holds the next batch, and the last one until the search has read it, besides the searched one
+        # streamed X holds two batches on the device instead of none, the searched one and the next (see _pipelined)
         copies = 8 * n_features if streamed else 0
         if kernel is not None:
             # no scores in memory, only up to about 4 copies of the batch (transposed or as two TF32 parts, centred,

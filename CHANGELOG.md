@@ -40,9 +40,9 @@
     streamed; NumPy arrays, torch tensors on any device, DLPack arrays such as CuPy's, pandas objects and lists are
     not. `stream=True` and `stream=False` force either. A memmap, read into memory before, is now streamed by default.
   - With the same batches the map is the same as in memory, bit for bit wherever a fit is deterministic, except that
-    streamed `init="sample"` draws its rows otherwise, in host memory that does not grow with the number of samples,
-    and so starts from different samples for the same `random_state`, as another `random_state` would: an equally
-    good map, not the same one.
+    streamed `init="sample"` draws its rows otherwise, in host memory that does not grow with the number of samples
+    (but for a byte per sample under cosine and correlation), and so starts from different samples for the same
+    `random_state`, as another `random_state` would: an equally good map, not the same one.
   - A streamed `fit` sets no `labels_` (`predict` gives them, and `fit_predict` calls it); reading `labels_` then
     raises an `AttributeError` that says so, such as "labels_ is not set when fit streams X (a numpy.memmap here);
     call predict(X)", and `hasattr(som, "labels_")` is False.

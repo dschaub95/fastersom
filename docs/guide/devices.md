@@ -42,9 +42,9 @@ labels = som.predict(X)
   a NumPy array or memmap, an h5py or zarr dataset, or a CPU tensor. fastersom reads nothing but such slices, and needs
   neither h5py nor zarr itself. Inputs of shape `(..., n_features)` are flattened only as C-contiguous NumPy arrays or
   tensors, whose reshape is a view.
-- Each batch is converted to float32 as it is read. On CUDA a thread reads it into one of two pinned 64 MB buffers
-  (a larger batch in several parts) and a second CUDA stream copies it to the GPU, both while the previous batch is
-  searched. On MPS each batch is copied as it is, and on the CPU it is used where it was read.
+- Each batch is converted to float32 as it is read. On CUDA a thread reads it into one of two pinned buffers of up to
+  64 MB (a larger batch in several parts) and a second CUDA stream copies it to the GPU, both while the previous batch
+  is searched. On MPS each batch is copied as it is, and on the CPU it is used where it was read.
 - `fit` reads `X` once before the epochs, to check that it is finite and to find its range per feature, which
   `deterministic=True` needs. `init="pca"` reads it twice more, for the mean and the covariance; `init="sample"` reads
   only the rows it picks, and under cosine and correlation notes in the first pass which samples have a BMU (a byte
@@ -57,10 +57,10 @@ labels = som.predict(X)
   the same one.
 - `fit` does not set `labels_`, which would hold an int64 per sample and take another pass over `X` under the final
   weights; reading it raises an `AttributeError` that says so (`hasattr(som, "labels_")` is False), until a fit in
-  memory sets it again. `predict(X)` returns them, and `fit_predict` calls it. `predict`, `transform` and the error measures read `X` once, and raise for values that are not finite only
-  at the end of that pass. `predict` copies each batch's BMUs and distances (12 bytes per sample) to the host as they
-  are found, on CUDA through pinned memory without waiting for each copy, and the error measures sum over each batch,
-  so that the device holds nothing per sample.
+  memory sets it again. `predict(X)` returns them, and `fit_predict` calls it. `predict`, `transform` and the error
+  measures read `X` once, and raise for values that are not finite only at the end of that pass. `predict` copies each
+  batch's BMUs and distances (12 bytes per sample) to the host as they are found, on CUDA through pinned memory without
+  waiting for each copy, and the error measures sum over each batch, so that the device holds nothing per sample.
 - `transform` returns a dense `n_samples x n_nodes` float32 array on the host. `transform(X, out=D)` writes the
   distances batch by batch into `D` instead, any writable array of that shape that takes `D[i:j] = rows`, such as a
   memmap, an h5py or zarr dataset or a tensor on any device, and `transform_batches(X)` yields them as `(start, distances)` per batch, for
