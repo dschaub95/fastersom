@@ -337,7 +337,8 @@ def _nth_true(mask: np.ndarray, ranks: np.ndarray) -> np.ndarray:
     """np.flatnonzero(mask)[ranks], in blocks of 2^20 values, without the positions of all True values at once."""
     block = 1 << 20
     starts = np.arange(0, len(mask), block)
-    ends = np.add.reduceat(mask, starts, dtype=np.int64).cumsum()  # True values up to the end of each block
+    # True values up to the end of each block, counted per block, as np.add.reduceat would cast all of mask to int64
+    ends = np.cumsum([np.count_nonzero(mask[start : start + block]) for start in starts])
     blocks = np.searchsorted(ends, ranks, side="right")
     positions = np.empty(len(ranks), dtype=np.int64)
     for b in np.unique(blocks).tolist():
