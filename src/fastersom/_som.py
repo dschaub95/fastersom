@@ -1616,20 +1616,17 @@ class SOM:
         data = self._check_X(X)
         if len(self._weights) < 2:
             return 0.0
-        if isinstance(data, torch.Tensor):
-            has_bmu = self._has_bmu(data)
-            if has_bmu is not None:
-                data = data[has_bmu]
         kernel = self._kernel(data.shape[1], top2=True)
         search = self._search(self._weights, kernel, top2=True)
         batch_size = self._batch_size_for(data.shape[1], kernel, isinstance(data, _Stream))
         if isinstance(data, torch.Tensor):
-            nodes = torch.cat([search(batch) for batch in self._batches(data, batch_size)])
-            offset = (self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1)
-            return float((offset > 1).cpu().double().mean())
-        # streamed, counted per batch on the device
+            has_bmu = self._has_bmu(data)
+            batches = (data if has_bmu is None else data[has_bmu]).split(batch_size)
+        else:  # the same batches, streamed
+            batches = self._kept_batches(data, batch_size)
+        # counted per batch on the device
         errors, count = torch.zeros((), dtype=torch.int64, device=self._device), 0
-        for batch in self._kept_batches(data, batch_size):
+        for batch in batches:
             nodes = search(batch)
             errors += ((self._coords[nodes[:, 0]] - self._coords[nodes[:, 1]]).abs().amax(1) > 1).sum()
             count += len(batch)
