@@ -1461,6 +1461,8 @@ def test_transform_batches_and_out_validation(data):
     for out in (np.zeros((5000, 29)), np.zeros(5000 * 30), [[0.0] * 30] * 5000):
         with pytest.raises(ValueError, match=r"out must have shape \(5000, 30\)"):
             som.transform(data, out=out)
+    with pytest.raises(TypeError):  # out after the ignored y, keyword only
+        som.fit_transform(data, None, np.zeros((5000, 30)))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

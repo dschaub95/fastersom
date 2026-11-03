@@ -1579,13 +1579,13 @@ class SOM:
         return out
 
     @overload
-    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, out: None = None) -> np.ndarray: ...
+    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, *, out: None = None) -> np.ndarray: ...
 
     @overload
     def fit_transform[T](self, X: ArrayLike | torch.Tensor, y: object = None, *, out: T) -> T: ...
 
-    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, out: Any = None) -> Any:
-        """Fits the map and returns transform(X, out)."""
+    def fit_transform(self, X: ArrayLike | torch.Tensor, y: object = None, *, out: Any = None) -> Any:
+        """Fits the map and returns transform(X, out); out is keyword only, as y comes before it."""
         return self.fit(X).transform(X, out)
 
     def quantization_error(self, X: ArrayLike | torch.Tensor) -> float:
