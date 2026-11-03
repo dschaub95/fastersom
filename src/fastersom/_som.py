@@ -424,7 +424,9 @@ class _Stream:
         While the caller's stream searches a batch, the thread reads the next rows and the side stream copies the rows
         before, both overlapping the search. A batch beyond a buffer's _PINNED_VALUES arrives in several copies. A
         buffer is refilled only once its last copy has finished, and the batches are allocated on the side stream and
-        recorded on the caller's, so that their memory is not reused while the search still reads them.
+        recorded on the caller's, so that their memory is not reused while the search still reads them. A batch is
+        allocated only once the search of the one two before has finished, so that however far the GPU lags behind,
+        the device holds two batches at most.
         """
         n_samples, n_features = self.shape
         rows = min(batch_size, n_samples, max(1, _PINNED_VALUES // n_features))
@@ -438,6 +440,7 @@ class _Stream:
         current, side = torch.cuda.current_stream(self.device), torch.cuda.Stream(self.device)
         buffers = [torch.empty((rows, n_features), pin_memory=True) for _ in range(2)]
         copied = [torch.cuda.Event(), torch.cuda.Event()]  # recorded after each copy out of the buffer
+        searched = [torch.cuda.Event(), torch.cuda.Event()]  # recorded once the caller has queued its work on a batch
 
         def fill(k: int, start: int, stop: int) -> None:
             copied[k % 2].synchronize()  # the buffer's previous copy, of part k - 2, has finished
@@ -455,6 +458,7 @@ class _Stream:
                     pending = reader.submit(fill, k + 1, following[1], following[2])
                 with torch.cuda.stream(side):
                     if start == begin:
+                        searched[begin // batch_size % 2].synchronize()  # of the batch two before
                         batch = torch.empty((end - begin, n_features), device=self.device)
                     batch[start - begin : stop - begin].copy_(buffers[k % 2][: stop - start], non_blocking=True)
                     copied[k % 2].record(side)
@@ -462,6 +466,7 @@ class _Stream:
                     current.wait_stream(side)
                     batch.record_stream(current)
                     yield batch
+                    searched[begin // batch_size % 2].record(current)
                 if following is None:
                     return
                 k, part = k + 1, following

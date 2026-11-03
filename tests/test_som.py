@@ -1479,6 +1479,22 @@ def test_stream_cuda_copies(data, tmp_path, monkeypatch):
         SOM(**kwargs, stream=True).fit(bad)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_stream_cuda_batches_bounded(data):
+    # however far the search lags behind the copies, two batches at most are on the device
+    from fastersom._som import _Stream
+
+    def active():
+        return torch.cuda.memory_stats()["active_bytes.all.current"]
+
+    stream, before, peak = _Stream(data, torch.device("cuda")), active(), 0
+    for _ in stream.batches(256):  # 20 batches of 6 KB
+        torch.cuda._sleep(1_000_000)  # a slow search
+        peak = max(peak, active() - before)
+    torch.cuda.synchronize()
+    assert peak <= 2 * 256 * 6 * 4 + 4096  # and the extremes of the first pass
+
+
 def test_nth_true():
     from fastersom._som import _nth_true
 
