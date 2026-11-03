@@ -1479,6 +1479,23 @@ def test_stream_cuda_copies(data, tmp_path, monkeypatch):
         SOM(**kwargs, stream=True).fit(bad)
 
 
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+def test_stream_ignores_torch_defaults(data, device):
+    # float32 batches, CPU pinned buffers and outputs, whatever torch's default dtype and device
+    kwargs = {**STREAM_KWARGS, "device": device, "deterministic": True, "stream": True}
+    expected = SOM(**kwargs).fit(data).weights_
+    torch.set_default_device(device)
+    torch.set_default_dtype(torch.float64)
+    try:
+        som = SOM(**kwargs).fit(data)
+        distances = som.predict(data, return_distance=True)[1]
+    finally:
+        torch.set_default_device(None)
+        torch.set_default_dtype(torch.float32)
+    np.testing.assert_array_equal(som.weights_, expected)
+    assert distances.dtype == np.float32
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_stream_cuda_batches_bounded(data):
     # however far the search lags behind the copies, two batches at most are on the device

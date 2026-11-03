@@ -320,7 +320,7 @@ def _to_host(parts: Iterable[tuple[torch.Tensor, ...]], outputs: tuple[torch.Ten
         if part[0].device.type != "cuda":
             move(start, part, None)
         else:
-            staged = tuple(torch.empty(t.shape, dtype=t.dtype, pin_memory=True) for t in part)
+            staged = tuple(torch.empty(t.shape, dtype=t.dtype, device="cpu", pin_memory=True) for t in part)
             for buffer, values in zip(staged, part, strict=True):
                 buffer.copy_(values, non_blocking=True)
             copied = torch.cuda.Event()
@@ -438,7 +438,9 @@ class _Stream:
                     yield begin, start, min(start + rows, end), end
 
         current, side = torch.cuda.current_stream(self.device), torch.cuda.Stream(self.device)
-        buffers = [torch.empty((rows, n_features), pin_memory=True) for _ in range(2)]
+        buffers = [
+            torch.empty((rows, n_features), dtype=torch.float32, device="cpu", pin_memory=True) for _ in range(2)
+        ]
         copied = [torch.cuda.Event(), torch.cuda.Event()]  # recorded after each copy out of the buffer
         searched = [torch.cuda.Event(), torch.cuda.Event()]  # recorded once the caller has queued its work on a batch
 
@@ -459,7 +461,7 @@ class _Stream:
                 with torch.cuda.stream(side):
                     if start == begin:
                         searched[begin // batch_size % 2].synchronize()  # of the batch two before
-                        batch = torch.empty((end - begin, n_features), device=self.device)
+                        batch = torch.empty((end - begin, n_features), dtype=torch.float32, device=self.device)
                     batch[start - begin : stop - begin].copy_(buffers[k % 2][: stop - start], non_blocking=True)
                     copied[k % 2].record(side)
                 if stop == end:
@@ -1159,8 +1161,8 @@ class SOM:
         """
         found = self._batch_bmus(data, weights, return_distance)
         if isinstance(data, _Stream):
-            bmu = torch.empty(len(data), dtype=torch.int64)
-            distance = torch.empty(len(data)) if return_distance else None
+            bmu = torch.empty(len(data), dtype=torch.int64, device="cpu")
+            distance = torch.empty(len(data), dtype=torch.float32, device="cpu") if return_distance else None
             parts = ((b,) if d is None else (b, d) for b, d in found)
             _to_host(parts, (bmu,) if distance is None else (bmu, distance))
             return bmu, distance
