@@ -379,11 +379,6 @@ def _out_of_core(X: Any) -> bool:
     return hasattr(X, "shape") and not any(hasattr(X, name) for name in _IN_MEMORY)
 
 
-def _type_name(X: Any) -> str:
-    """The type of X by its top-level package, such as numpy.memmap or h5py.Dataset."""
-    return f"{type(X).__module__.partition('.')[0]}.{type(X).__name__}"
-
-
 class _Stream:
     """Samples kept on the host and read in batches of rows, as float32 tensors on the device (see SOM's stream).
 
@@ -1470,7 +1465,8 @@ class SOM:
         if isinstance(data, torch.Tensor):
             self.labels_ = self._bmus(data, weights, return_distance=False)[0].cpu().numpy()
         else:  # not when streamed, as an int64 per sample can exceed memory too; labels_ then raises saying why
-            self._unlabelled = "stream=True" if self.stream is True else f"a {_type_name(X)}"
+            package = type(X).__module__.partition(".")[0]  # numpy, h5py, ...
+            self._unlabelled = "stream=True" if self.stream is True else f"a {package}.{type(X).__name__}"
         return self
 
     @overload
