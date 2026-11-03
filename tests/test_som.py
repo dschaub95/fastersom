@@ -1507,6 +1507,19 @@ def test_stream_ignores_torch_defaults(data, device):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_stream_cuda_tensor_on_callers_stream():
+    # the reading thread reads a CUDA tensor only once the caller's stream has written it
+    weights = np.array([[0.0] * 4, [10.0] * 4], dtype=np.float32)
+    som = SOM.from_weights(weights, 1, 2, device="cuda", stream=True)
+    X = torch.zeros(100_000, 4, device="cuda")
+    som.predict(X)  # compiles and checks the kernel first, which would wait for the write
+    with torch.cuda.stream(torch.cuda.Stream()):
+        torch.cuda._sleep(50_000_000)  # a slow write
+        X.fill_(10.0)
+        assert (som.predict(X) == 1).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_stream_cuda_batches_bounded(data):
     # however far the search lags behind the copies, two batches at most are on the device
     from fastersom._som import _Stream

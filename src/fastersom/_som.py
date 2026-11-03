@@ -439,8 +439,14 @@ class _Stream:
         ]
         copied = [torch.cuda.Event(), torch.cuda.Event()]  # recorded after each copy out of the buffer
         searched = [torch.cuda.Event(), torch.cuda.Event()]  # recorded once the caller has queued its work on a batch
+        # a CUDA tensor X as the caller's stream wrote it, which the thread's stream does not wait for
+        written = torch.cuda.Event() if isinstance(self.X, torch.Tensor) and self.X.is_cuda else None
+        if written is not None:
+            written.record(current)
 
         def fill(k: int, start: int, stop: int) -> None:
+            if written is not None:
+                written.synchronize()
             copied[k % 2].synchronize()  # the buffer's previous copy, of part k - 2, has finished
             self._fill(buffers[k % 2], start, stop)
 
