@@ -28,6 +28,29 @@
     35 features at most 0.11 s per epoch at 300 x 300 nodes).
   - `precision="float16"` keeps the search in float32 under the mexican hat, whose negative weights can move the
     nodes beyond the range of the samples and initial weights that half's scaling is checked against.
+- `stream` (keyword only) fits from data on the host, read batch by batch in every epoch rather than copied to the
+  device, for data beyond the device's memory: a NumPy memmap, an h5py or zarr dataset, or anything else whose row
+  slices are arrays or tensors (see "Data larger than the device's memory" in the user guide on devices). On CUDA the
+  batches pass through two pinned buffers, read by a thread and copied on a second CUDA stream while the previous
+  batch is searched; on an A100, 4 GB from the page cache took 0.33 s per epoch, about 12 GB/s. `predict`, `transform`
+  and the error measures stream too.
+  - `stream="auto"`, the default, decides on every call by the type of `X`, never by its size against the free
+    memory, which would make the map depend on the machine: a NumPy memmap (as `np.load(..., mmap_mode="r")` returns)
+    and anything else with a `shape` that is not in memory (h5py, zarr, dask, detected without importing them) are
+    streamed; NumPy arrays, torch tensors on any device, DLPack arrays such as CuPy's, pandas objects and lists are
+    not. `stream=True` and `stream=False` force either. A memmap, read into memory before, is now streamed by default.
+  - With the same batches the map is the same as in memory, bit for bit wherever a fit is deterministic, except that
+    streamed `init="sample"` draws its rows otherwise, in host memory that does not grow with the number of samples
+    (but for a byte per sample under cosine and correlation), and so starts from different samples for the same
+    `random_state`, as another `random_state` would: an equally good map, not the same one.
+  - A streamed `fit` sets no `labels_` (`predict` gives them, and `fit_predict` calls it); reading `labels_` then
+    raises an `AttributeError` that says so, such as "labels_ is not set when fit streams X (a numpy.memmap here);
+    call predict(X)", and `hasattr(som, "labels_")` is False.
+  - `transform_batches(X, batch_size=None)` yields the distances of `transform` per batch as `(start, distances)`, a
+    float32 array of shape `(rows, n_nodes)` on the host each, and `transform(X, out=D)` (and `fit_transform`) writes
+    them batch by batch into `D`, any writable array of shape `(n_samples, n_nodes)` such as a memmap, an h5py or
+    zarr dataset or a tensor on any device, so that they need not fit in memory either.
+  - Maps pickled by 0.7.0 load with `stream=False`, as they never streamed (issue #34).
 - Widths below 0.05 grid units skip the smoothing, which is the identity there in float32; before, widths below about
   4e-20 gave NaN and left the map unchanged.
 - On CUDA, the tensor-core kernel loops over chunks of 16 features instead of 32 on GPUs whose blocks lack the shared
