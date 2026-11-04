@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-11-04)
 
 - New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
   "Neighbourhoods and width schedules". The defaults keep 0.7.0's neighbourhood and width schedule and give
