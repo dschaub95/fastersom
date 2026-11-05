@@ -30,7 +30,7 @@ import sysconfig
 import warnings
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from functools import cache
 from itertools import islice
@@ -521,14 +521,18 @@ class _Stream:
 
         parts = enumerate(ranges())
         with ThreadPoolExecutor(n_readers) as readers:
+
+            def read(k: int, part: tuple[int, int, int, int]) -> tuple[int, tuple[int, int, int, int], Future[None]]:
+                return k, part, readers.submit(fill, k, part[1], part[2])
+
             # the parts being read, in order: k and its rows, whose buffers differ from that of the part being copied
-            reading = deque((k, part, readers.submit(fill, k, *part[1:3])) for k, part in islice(parts, n_readers))
+            reading = deque(read(*indexed) for indexed in islice(parts, n_readers))
             while reading:
                 k, (begin, start, stop, end), pending = reading.popleft()
                 pending.result()
                 following = next(parts, None)
                 if following is not None:  # part k + n_readers, into the buffer of part k - 1, whose copy is queued
-                    reading.append((*following, readers.submit(fill, following[0], *following[1][1:3])))
+                    reading.append(read(*following))
                 with torch.cuda.stream(side):
                     if start == begin:
                         searched[begin // batch_size % 2].synchronize()  # of the batch two before
@@ -1459,10 +1463,10 @@ class SOM:
         # not under the mexican hat, whose negative weights can move the nodes beyond the range checked below
         magnitude, half = None, self.precision == "float16" and self.neighbourhood != "mexican_hat"
         metal = _metal(self._device) if half else None  # only then, as fused=False must not compile the kernels
+        ranged = deterministic or (half and metal is not None)  # the Metal half kernels' scales need the range too
         if isinstance(data, _Stream) and (
             self.n_epochs == 0  # which reads X in no epoch
-            or deterministic
-            or (half and metal is not None)
+            or ranged
             or (isinstance(self.init, str) and self.init == "sample" and self.metric in ("cosine", "correlation"))
         ):
             # a pass of its own for what the epochs need first: the range of X, or the samples init draws from;
