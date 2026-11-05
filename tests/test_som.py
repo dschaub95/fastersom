@@ -1603,6 +1603,7 @@ def test_stream_scan_batch_size(data, monkeypatch):
     [
         ({}, 0),
         ({"init": "pca"}, 0),
+        ({"init": "pca", "n_epochs": 0}, 0),  # which reads X, its range included
         ({"init": "sample"}, 0),
         ({"init": "sample", "metric": "cosine"}, 1),
         ({"n_epochs": 0}, 1),

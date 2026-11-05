@@ -50,10 +50,10 @@ labels = som.predict(X)
   slices of `X` at once, which must thus be thread-safe (as NumPy's, zarr's, h5py's and dask's are). On MPS each batch
   is copied as it is, and on the CPU it is used where it was read.
 - `fit` checks in its first pass over `X` that it is finite, raising at the end of that pass. It reads `X` once more
-  before the epochs only where they need it first: for its range per feature, which `deterministic=True` needs, and
-  for `init="sample"` under cosine and correlation, which notes in that pass which samples have a BMU (a byte per
-  sample on the host). `init="pca"` reads it twice more, for the mean and the covariance; `init="sample"` reads only
-  the rows it picks.
+  before the epochs only where they need it first: for its range per feature, which `deterministic=True` needs unless
+  `init="pca"` has read it, and for `init="sample"` under cosine and correlation, which notes in that pass which samples
+  have a BMU (a byte per sample on the host). `init="pca"` reads it twice more, for the mean and the covariance;
+  `init="sample"` reads only the rows it picks.
 - With the same batches, a streamed fit gives the same map as one in memory, bit for bit wherever a fit is
   deterministic (on the CPU, and with `deterministic=True`). Pass an explicit `batch_size` to compare the two, as the
   default depends on the free memory. `init="sample"` is the exception: streamed, it draws its rows otherwise, in host

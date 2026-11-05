@@ -711,14 +711,15 @@ class SOM:
         samples only, is read straight from its chunk files, and the row slices of any other X may be read by several
         threads at once, so its slicing must be thread-safe (as numpy's, zarr's, h5py's and dask's is). fit's first pass
         checks that X is finite, raising at its end, and fit reads X once more before the epochs only for its range
-        under deterministic=True and for init="sample" under cosine and correlation; init="pca" reads it twice more and
-        init="sample" reads its rows one by one, drawn otherwise than in memory (in host memory that does not grow with
-        n_samples, but for a byte per sample under cosine and correlation), so that the two start from different samples
-        for the same random_state, as another random_state would: an equally good map, not the same one. Otherwise the
-        map is that of the same batches in memory, bit for bit wherever a fit is deterministic. fit sets no ``labels_``,
-        an int64 per sample (call predict). predict copies each batch's BMUs and distances to the host as they are
-        found, and the error measures sum over each batch, so that neither keeps anything per sample on the device; both
-        raise for samples that are not finite only at the end of their pass. Keyword only.
+        under deterministic=True, unless init="pca" has read it, and for init="sample" under cosine and correlation;
+        init="pca" reads it twice more and init="sample" reads its rows one by one, drawn otherwise than in memory (in
+        host memory that does not grow with n_samples, but for a byte per sample under cosine and correlation), so that
+        the two start from different samples for the same random_state, as another random_state would: an equally good
+        map, not the same one. Otherwise the map is that of the same batches in memory, bit for bit wherever a fit is
+        deterministic. fit sets no ``labels_``, an int64 per sample (call predict). predict copies each batch's BMUs
+        and distances to the host as they are found, and the error measures sum over each batch, so that neither keeps
+        anything per sample on the device; both raise for samples that are not finite only at the end of their pass.
+        Keyword only.
 
     Attributes
     ----------
@@ -1464,21 +1465,21 @@ class SOM:
         magnitude, half = None, self.precision == "float16" and self.neighbourhood != "mexican_hat"
         metal = _metal(self._device) if half else None  # only then, as fused=False must not compile the kernels
         ranged = deterministic or (half and metal is not None)  # the Metal half kernels' scales need the range too
-        if isinstance(data, _Stream) and (
-            self.n_epochs == 0  # which reads X in no epoch
-            or ranged
-            or (isinstance(self.init, str) and self.init == "sample" and self.metric in ("cosine", "correlation"))
-        ):
-            # a pass of its own for what the epochs need first: the range of X, or the samples init draws from;
-            # otherwise the first pass that reads X checks that it is finite, raising at its end (the search finds
-            # some node for a sample that is not finite, whose sums the error then discards with the map)
+        # streamed, a pass of its own only for what init or the epochs need first: the samples init="sample" draws from
+        # under cosine and correlation, or the range of X unless init="pca" has read it (or X with no epoch to read it);
+        # otherwise the first pass that reads X checks that it is finite, raising at its end (the search finds some node
+        # for a sample that is not finite, whose sums the error then discards with the map)
+        sample = isinstance(self.init, str) and self.init == "sample" and self.metric in ("cosine", "correlation")
+        if isinstance(data, _Stream) and sample:
             self._scan(data)
         weights = self._init_weights(data)
+        if isinstance(data, _Stream) and data.extremes is None and (ranged or self.n_epochs == 0):
+            self._scan(data)
         if ranged:
             if isinstance(data, torch.Tensor):
                 magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
             else:
-                assert data.extremes is not None  # from _scan
+                assert data.extremes is not None  # from the first pass
                 magnitude = torch.maximum(data.extremes[1], -data.extremes[0])
         if half and metal is not None:
             assert magnitude is not None
