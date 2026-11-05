@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 (2026-11-05)
 
 - Streamed fits read their data up to 10x as fast. On an A100 at 1000 features, an 11-epoch fit of a 32 x 32 map on 4 GB
   of an uncompressed zarr store took 4.9 s instead of 50.7 s, its epochs as fast as from a memmap or from GPU memory
