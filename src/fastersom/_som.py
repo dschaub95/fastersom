@@ -499,8 +499,10 @@ class _Stream:
                     yield begin, start, min(start + rows, end), end
 
         current, side = torch.cuda.current_stream(self.device), torch.cuda.Stream(self.device)
-        # no more than the parts, of which there are at least n_samples / rows; process_cpu_count from Python 3.13
-        n_readers = min(_READERS, getattr(os, "process_cpu_count", os.cpu_count)() or 1, -(-n_samples // rows))
+        # no more than the CPUs the process may use (as Python 3.13's os.process_cpu_count) or than the parts, of which
+        # there are at least n_samples / rows
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        n_readers = min(_READERS, cpus, -(-n_samples // rows))
         n_buffers = n_readers + 1
         buffers = [
             torch.empty((rows, n_features), dtype=torch.float32, device="cpu", pin_memory=True)
