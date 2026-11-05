@@ -1474,7 +1474,7 @@ class SOM:
             # some node for a sample that is not finite, whose sums the error then discards with the map)
             self._scan(data)
         weights = self._init_weights(data)
-        if deterministic or (half and metal is not None):  # the Metal half kernels' scales need it
+        if ranged:
             if isinstance(data, torch.Tensor):
                 magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
             else:
