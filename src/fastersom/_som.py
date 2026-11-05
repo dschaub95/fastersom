@@ -23,14 +23,17 @@ References
     J. Vesanto et al., SOM Toolbox for Matlab 5, Helsinki University of Technology, 2000.
 """
 
+import os
 import subprocess
 import sys
 import sysconfig
 import warnings
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from functools import cache
+from itertools import islice
 from math import ceil, floor, isfinite, prod
 from pathlib import Path
 from types import ModuleType
@@ -82,9 +85,14 @@ _PRECISIONS = ("float32", "float16")
 # part is copied by the selection of the samples with a BMU, 64 MB per copy at most unless a batch is larger
 _CPU_SUM_ROWS = 1 << 20
 _CPU_SUM_VALUES = 1 << 24
-# float32 values per pinned host buffer (64 MB, two of them) through which stream=True copies batches to CUDA; a larger
-# batch arrives in several copies
+# float32 values per pinned host buffer (64 MB) through which stream=True copies batches to CUDA; a larger batch arrives
+# in several copies
 _PINNED_VALUES = 1 << 24
+# threads, at most one per CPU the process may use, that read streamed X into the pinned buffers on CUDA, one more
+# buffer than threads: reads release the GIL, so that they overlap. On an A100 at 1000 features, 2 threads read an
+# uncompressed zarr store's chunk files from the page cache as fast as the search goes (1 thread 6.5 GB/s), 4 read
+# them from disk twice as fast as 1, and 8 decompress zstd chunks 4x as fast as 1
+_READERS = 8
 # precision="float16" searches with fewer features in float32: the scores' rounding error, about 2^-11 ||x - c|| ||v||
 # with the ||x - c||^2 dropped from them, then becomes comparable to the distances themselves (in a CPU emulation of
 # 0-1 pixels with 5 features, quantization error 2.7% above float32's), and the kernels gain little there anyway
@@ -379,6 +387,55 @@ def _out_of_core(X: Any) -> bool:
     return hasattr(X, "shape") and not any(hasattr(X, name) for name in _IN_MEMORY)
 
 
+def _chunk_reader(X: Any) -> Callable[[np.ndarray, int], None] | None:
+    """For a zarr array of uncompressed float32 rows in local chunk files, a function reading them straight from those.
+
+    The function reads rows start to start + len(out) of X into the float32 C-contiguous array out, from each chunk's
+    file without zarr, whose reads allocate each chunk's bytes afresh (which page-faults through all of them) and copy
+    them twice, about 1 GB/s against 6 GB/s from the page cache. A chunk without a file (zarr writes none of fill_value
+    alone), or one shorter than its rows, is read by zarr. None for anything else: a compressed, filtered, transposed
+    or sharded array, one chunked along the features, of another dtype or byte order, or in another store.
+    """
+    if type(X).__module__.partition(".")[0] != "zarr":
+        return None
+    try:
+        metadata, store = X.metadata, X.store_path.store
+        if type(store).__name__ != "LocalStore" or len(X.shape) != 2 or tuple(X.chunks)[1] != X.shape[1]:
+            return None
+        if metadata.zarr_format == 3:
+            (codec,) = metadata.codecs  # the bytes serializer alone, which stores the chunk in C order
+            endian = str(getattr(codec.endian, "value", codec.endian))
+            if type(codec).__name__ != "BytesCodec" or endian != sys.byteorder or np.dtype(X.dtype) != np.float32:
+                return None
+        elif metadata.zarr_format == 2:
+            raw = metadata.compressor is None and not metadata.filters and metadata.order == "C"
+            if not raw or metadata.dtype.to_native_dtype() != np.dtype(np.float32):  # the native byte order
+                return None
+        else:
+            return None
+        root, rows, row_bytes = Path(store.root).absolute() / X.store_path.path, int(X.chunks[0]), 4 * int(X.shape[1])
+        key = metadata.encode_chunk_key
+    except (AttributeError, TypeError, ValueError):  # another zarr, or other metadata, than these read
+        return None
+
+    def read(out: np.ndarray, start: int) -> None:
+        stop = start + len(out)
+        for chunk in range(start // rows, (stop - 1) // rows + 1):
+            low, high = max(start, chunk * rows), min(stop, (chunk + 1) * rows)
+            view = memoryview(out[low - start : high - start]).cast("B")
+            try:
+                with open(root / key((chunk, 0)), "rb", buffering=0) as file:
+                    file.seek((low - chunk * rows) * row_bytes)
+                    while view and (count := file.readinto(view)):  # a read stops short at 2 GB on Linux
+                        view = view[count:]
+            except FileNotFoundError:
+                pass
+            if view:  # no file, or a short one
+                np.copyto(out[low - start : high - start], np.asarray(X[low:high]), casting="unsafe")
+
+    return read
+
+
 class _Stream:
     """Samples kept on the host and read in batches of rows, as float32 tensors on the device (see SOM's stream).
 
@@ -392,12 +449,17 @@ class _Stream:
         self.X, self.shape, self.device = X, tuple(X.shape), device
         self.extremes: tuple[torch.Tensor, torch.Tensor] | None = None
         self.has_bmu: np.ndarray | None = None
+        self.chunks = _chunk_reader(X)
 
     def __len__(self) -> int:
         return self.shape[0]
 
     def _read(self, start: int, stop: int) -> torch.Tensor:
         """Rows start to stop as a float32 tensor on the CPU."""
+        if self.chunks is not None:
+            out = np.empty((min(stop, len(self)) - start, self.shape[1]), dtype=np.float32)
+            self.chunks(out, start)
+            return torch.from_numpy(out)
         rows = self.X[start:stop]
         if isinstance(rows, torch.Tensor):
             return rows.detach().to("cpu", torch.float32).contiguous()
@@ -407,6 +469,9 @@ class _Stream:
 
     def _fill(self, buffer: torch.Tensor, start: int, stop: int) -> None:
         """Reads rows start to stop (all within X) into the first rows of a float32 buffer on the CPU."""
+        if self.chunks is not None:
+            self.chunks(buffer[: stop - start].numpy(), start)
+            return
         rows = self.X[start:stop]
         if isinstance(rows, torch.Tensor):
             buffer[: stop - start].copy_(rows.detach())
@@ -415,14 +480,14 @@ class _Stream:
             np.copyto(buffer[: stop - start].numpy(), np.asarray(rows), casting="unsafe")
 
     def _pipelined(self, batch_size: int) -> Iterator[torch.Tensor]:
-        """The batches on CUDA, read by a thread into two pinned buffers in turn and copied on a side stream.
+        """The batches on CUDA, read by threads into pinned buffers in turn (see _READERS) and copied on a side stream.
 
-        While the caller's stream searches a batch, the thread reads the next rows and the side stream copies the rows
-        before, both overlapping the search. A batch beyond a buffer's _PINNED_VALUES arrives in several copies. A
-        buffer is refilled only once its last copy has finished, and the batches are allocated on the side stream and
-        recorded on the caller's, so that their memory is not reused while the search still reads them. A batch is
-        allocated only once the search of the one two before has finished, so that however far the GPU lags behind,
-        the device holds two batches at most.
+        While the caller's stream searches a batch, the threads read the next parts of rows, one each, and the side
+        stream copies the part before, all overlapping the search. A batch beyond a buffer's _PINNED_VALUES arrives in
+        several parts. A buffer is refilled only once its last copy has finished, and the batches are allocated on the
+        side stream and recorded on the caller's, so that their memory is not reused while the search still reads them.
+        A batch is allocated only once the search of the one two before has finished, so that however far the GPU lags
+        behind, the device holds two batches at most.
         """
         n_samples, n_features = self.shape
         rows = min(batch_size, n_samples, max(1, _PINNED_VALUES // n_features))
@@ -434,10 +499,16 @@ class _Stream:
                     yield begin, start, min(start + rows, end), end
 
         current, side = torch.cuda.current_stream(self.device), torch.cuda.Stream(self.device)
+        # no more than the CPUs the process may use (as Python 3.13's os.process_cpu_count) or than the parts, of which
+        # there are at least n_samples / rows
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        n_readers = min(_READERS, cpus, -(-n_samples // rows))
+        n_buffers = n_readers + 1
         buffers = [
-            torch.empty((rows, n_features), dtype=torch.float32, device="cpu", pin_memory=True) for _ in range(2)
+            torch.empty((rows, n_features), dtype=torch.float32, device="cpu", pin_memory=True)
+            for _ in range(n_buffers)
         ]
-        copied = [torch.cuda.Event(), torch.cuda.Event()]  # recorded after each copy out of the buffer
+        copied = [torch.cuda.Event() for _ in range(n_buffers)]  # recorded after each copy out of the buffer
         searched = [torch.cuda.Event(), torch.cuda.Event()]  # recorded once the caller has queued its work on a batch
         # a CUDA tensor X as the caller's stream wrote it, which the thread's stream does not wait for
         written = torch.cuda.Event() if isinstance(self.X, torch.Tensor) and self.X.is_cuda else None
@@ -447,33 +518,34 @@ class _Stream:
         def fill(k: int, start: int, stop: int) -> None:
             if written is not None:
                 written.synchronize()
-            copied[k % 2].synchronize()  # the buffer's previous copy, of part k - 2, has finished
-            self._fill(buffers[k % 2], start, stop)
+            copied[k % n_buffers].synchronize()  # the buffer's previous copy, of part k - n_buffers, has finished
+            self._fill(buffers[k % n_buffers], start, stop)
 
-        parts = ranges()
-        k, part = 0, next(parts)
-        with ThreadPoolExecutor(1) as reader:
-            pending = reader.submit(fill, 0, part[1], part[2])
-            while True:
-                begin, start, stop, end = part
+        parts = enumerate(ranges())
+        with ThreadPoolExecutor(n_readers) as readers:
+
+            def read(k: int, part: tuple[int, int, int, int]) -> tuple[int, tuple[int, int, int, int], Future[None]]:
+                return k, part, readers.submit(fill, k, part[1], part[2])
+
+            # the parts being read, in order: k and its rows, whose buffers differ from that of the part being copied
+            reading = deque(read(*indexed) for indexed in islice(parts, n_readers))
+            while reading:
+                k, (begin, start, stop, end), pending = reading.popleft()
                 pending.result()
                 following = next(parts, None)
-                if following is not None:
-                    pending = reader.submit(fill, k + 1, following[1], following[2])
+                if following is not None:  # part k + n_readers, into the buffer of part k - 1, whose copy is queued
+                    reading.append(read(*following))
                 with torch.cuda.stream(side):
                     if start == begin:
                         searched[begin // batch_size % 2].synchronize()  # of the batch two before
                         batch = torch.empty((end - begin, n_features), dtype=torch.float32, device=self.device)
-                    batch[start - begin : stop - begin].copy_(buffers[k % 2][: stop - start], non_blocking=True)
-                    copied[k % 2].record(side)
+                    batch[start - begin : stop - begin].copy_(buffers[k % n_buffers][: stop - start], non_blocking=True)
+                    copied[k % n_buffers].record(side)
                 if stop == end:
                     current.wait_stream(side)
                     batch.record_stream(current)
                     yield batch
                     searched[begin // batch_size % 2].record(current)
-                if following is None:
-                    return
-                k, part = k + 1, following
 
     def batches(self, batch_size: int) -> Iterator[torch.Tensor]:
         """The samples in consecutive batches of batch_size on the device, in order."""
@@ -628,24 +700,28 @@ class SOM:
         epoch uses sigma_initial. Defaults to ``"after_last_epoch"`` under the exponential schedule, which keeps the
         width schedule of fastersom 0.7.0, and to ``"last_epoch"`` under the others. Keyword only.
     stream
-        Whether fit, predict, transform and the error measures read X from the host batch by batch rather than copy
-        all of it to the device, for data beyond the device's memory (or, from a memmap, the CPU's). ``"auto"`` decides
-        per call by the type of X, never by its size, so that the map does not depend on the machine's free memory: a
-        numpy memmap (as np.load(..., mmap_mode="r") returns) and anything else with a shape that is not in memory,
-        such as an h5py or zarr dataset or a dask array, are streamed; numpy arrays, tensors on any device, DLPack
-        arrays such as CuPy's, pandas objects and lists are not. True and False stream always and never. Streamed, X
-        can be anything of shape (n_samples, n_features) whose row slices are arrays or tensors, such as a CPU tensor,
-        and of shape (..., n_features) a C-contiguous numpy array or tensor. Each batch X[i:j] is converted to float32
-        and, on CUDA, read by a thread into one of two pinned buffers of up to 64 MB and copied on a second CUDA stream
-        while the previous batch is searched. fit reads X once more before the epochs, for the check that it is finite
-        and, with deterministic=True, its range; init="pca" reads it twice more and init="sample" reads its rows one by
-        one, drawn otherwise than in memory (in host memory that does not grow with n_samples, but for a byte per sample
-        under cosine and correlation), so that the two start from different samples for the same random_state, as
-        another random_state would: an equally good map, not the same one. Otherwise the map is that of the same batches
-        in memory, bit for bit wherever a fit is deterministic. fit sets no ``labels_``, an int64 per sample (call
-        predict). predict copies each batch's BMUs and distances to the host as they are found, and the error measures
-        sum over each batch, so that neither keeps anything per sample on the device; both raise for samples that are
-        not finite only at the end of their pass. Keyword only.
+        Whether fit, predict, transform and the error measures read X from the host batch by batch rather than copy all
+        of it to the device, for data beyond the device's memory (or, from a memmap, the CPU's). ``"auto"`` decides per
+        call by the type of X, never by its size, so that the map does not depend on the machine's free memory: a numpy
+        memmap (as np.load(..., mmap_mode="r") returns) and anything else with a shape that is not in memory, such as an
+        h5py or zarr dataset or a dask array, are streamed; numpy arrays, tensors on any device, DLPack arrays such as
+        CuPy's, pandas objects and lists are not. True and False stream always and never. Streamed, X can be anything of
+        shape (n_samples, n_features) whose row slices are arrays or tensors, such as a CPU tensor, and of shape
+        (..., n_features) a C-contiguous numpy array or tensor. Each batch X[i:j] is converted to float32 and, on CUDA,
+        read in parts by up to 8 threads into pinned buffers of up to 64 MB each and copied on a second CUDA stream
+        while the previous batch is searched; an uncompressed float32 zarr array in a local store, chunked along the
+        samples only, is read straight from its chunk files, and the row slices of any other X may be read by several
+        threads at once, so its slicing must be thread-safe (as numpy's, zarr's, h5py's and dask's is). fit's first pass
+        checks that X is finite, raising at its end, and fit reads X once more before the epochs only for its range
+        under deterministic=True, unless init="pca" has read it, and for init="sample" under cosine and correlation;
+        init="pca" reads it twice more and init="sample" reads its rows one by one, drawn otherwise than in memory (in
+        host memory that does not grow with n_samples, but for a byte per sample under cosine and correlation), so that
+        the two start from different samples for the same random_state, as another random_state would: an equally good
+        map, not the same one. Otherwise the map is that of the same batches in memory, bit for bit wherever a fit is
+        deterministic. fit sets no ``labels_``, an int64 per sample (call predict). predict copies each batch's BMUs
+        and distances to the host as they are found, and the error measures sum over each batch, so that neither keeps
+        anything per sample on the device; both raise for samples that are not finite only at the end of their pass.
+        Keyword only.
 
     Attributes
     ----------
@@ -1384,20 +1460,28 @@ class SOM:
         for attr in ("weights_", "labels_", "n_features_in_", "_unlabelled"):
             self.__dict__.pop(attr, None)
         data = self._check_X(X)
-        if isinstance(data, _Stream):
-            self._scan(data)
-        weights = self._init_weights(data)
         deterministic = self._device.type != "cpu" and (
             self.deterministic or torch.are_deterministic_algorithms_enabled()
         )
         # not under the mexican hat, whose negative weights can move the nodes beyond the range checked below
         magnitude, half = None, self.precision == "float16" and self.neighbourhood != "mexican_hat"
         metal = _metal(self._device) if half else None  # only then, as fused=False must not compile the kernels
-        if deterministic or (half and metal is not None):  # the Metal half kernels' scales need it
+        ranged = deterministic or (half and metal is not None)  # the Metal half kernels' scales need the range too
+        # streamed, a pass of its own only for what init or the epochs need first: the samples init="sample" draws from
+        # under cosine and correlation, or the range of X unless init="pca" has read it (or X with no epoch to read it);
+        # otherwise the first pass that reads X checks that it is finite, raising at its end (the search finds some node
+        # for a sample that is not finite, whose sums the error then discards with the map)
+        sample = isinstance(self.init, str) and self.init == "sample" and self.metric in ("cosine", "correlation")
+        if isinstance(data, _Stream) and sample:
+            self._scan(data)
+        weights = self._init_weights(data)
+        if isinstance(data, _Stream) and data.extremes is None and (ranged or self.n_epochs == 0):
+            self._scan(data)
+        if ranged:
             if isinstance(data, torch.Tensor):
                 magnitude = torch.maximum(data.amax(0), -data.amin(0))  # without a copy of data
             else:
-                assert data.extremes is not None  # from _scan
+                assert data.extremes is not None  # from the first pass
                 magnitude = torch.maximum(data.extremes[1], -data.extremes[0])
         if half and metal is not None:
             assert magnitude is not None

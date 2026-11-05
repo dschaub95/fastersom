@@ -40,15 +40,20 @@ labels = som.predict(X)
   `stream=True` streams any `X`, a CPU tensor say, and `stream=False` copies any `X` to the device, a memmap included.
 - `X` can be anything of shape `(n_samples, n_features)` whose row slices `X[i:j]` are NumPy arrays or torch tensors:
   a NumPy array or memmap, an h5py or zarr dataset, or a CPU tensor. fastersom reads nothing but such slices, and needs
-  neither h5py nor zarr itself. Inputs of shape `(..., n_features)` are flattened only as C-contiguous NumPy arrays or
-  tensors, whose reshape is a view.
-- Each batch is converted to float32 as it is read. On CUDA a thread reads it into one of two pinned buffers of up to
-  64 MB (a larger batch in several parts) and a second CUDA stream copies it to the GPU, both while the previous batch
-  is searched. On MPS each batch is copied as it is, and on the CPU it is used where it was read.
-- `fit` reads `X` once before the epochs, to check that it is finite and to find its range per feature, which
-  `deterministic=True` needs. `init="pca"` reads it twice more, for the mean and the covariance; `init="sample"` reads
-  only the rows it picks, and under cosine and correlation notes in the first pass which samples have a BMU (a byte
-  per sample on the host).
+  neither h5py nor zarr itself, with one exception: a zarr array of uncompressed float32 in a local store, chunked
+  along the samples only, is read straight from its chunk files, as zarr's own reads, which allocate and copy every
+  chunk afresh, run at about 1 GB/s. Inputs of shape `(..., n_features)` are flattened only as C-contiguous NumPy
+  arrays or tensors, whose reshape is a view.
+- Each batch is converted to float32 as it is read. On CUDA up to 8 threads (one per CPU at most) read it in parts of up
+  to 64 MB, each into a pinned buffer of its own, and a second CUDA stream copies them to the GPU, all while the
+  previous batch is searched; several threads overlap the reads from disk and zarr's decompression, and may read the
+  slices of `X` at once, which must thus be thread-safe (as NumPy's, zarr's, h5py's and dask's are). On MPS each batch
+  is copied as it is, and on the CPU it is used where it was read.
+- `fit` checks in its first pass over `X` that it is finite, raising at the end of that pass. It reads `X` once more
+  before the epochs only where they need it first: for its range per feature, which `deterministic=True` needs unless
+  `init="pca"` has read it, and for `init="sample"` under cosine and correlation, which notes in that pass which samples
+  have a BMU (a byte per sample on the host). `init="pca"` reads it twice more, for the mean and the covariance;
+  `init="sample"` reads only the rows it picks.
 - With the same batches, a streamed fit gives the same map as one in memory, bit for bit wherever a fit is
   deterministic (on the CPU, and with `deterministic=True`). Pass an explicit `batch_size` to compare the two, as the
   default depends on the free memory. `init="sample"` is the exception: streamed, it draws its rows otherwise, in host
@@ -76,7 +81,11 @@ labels = som.predict(X)
 The streamed fit is bound by reading the data rather than by the search. On an A100, a 32 x 32 map on 20 million
 samples x 50 features (4 GB) in float32, from a memmap in the page cache, took 0.33 s per epoch, about 12 GB/s, against
 0.11-0.15 s with the data in GPU memory: the reading thread copies from the page cache at 9-15 GB/s, the copies to the
-GPU run at 25 GB/s. Data that is not in the page cache is read at the speed of the disk.
+GPU run at 25 GB/s. At 1000 features (1 million samples, 4 GB), where the search itself takes about 0.4 s per epoch on
+an A100 shared with another job, an uncompressed zarr store in the page cache streams as fast as a memmap or as the data
+in GPU memory, 0.43 s per epoch (zarr's own reads took 4.1 s per epoch), and a 1-epoch fit read cold from the local
+disk took 0.70 s. A zstd-compressed store of the same data took 2.9 s per epoch, bound by its decompression. Data that
+is not in the page cache is read at the speed of the disk.
 
 ## What runs where
 

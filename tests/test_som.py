@@ -1230,6 +1230,59 @@ def test_stream_sample_init(data, metric):
     assert (X[:10, None] == weights[None]).all(-1).any(0).all()
 
 
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+def test_stream_zarr_chunk_files(data, tmp_path, device):
+    # uncompressed float32 rows in local chunk files are read straight from them, the rest through zarr
+    zarr = pytest.importorskip("zarr", minversion="3")
+    from fastersom._som import _chunk_reader
+
+    def array(store, **kwargs):
+        kwargs = {"shape": data.shape, "chunks": (700, 6), "dtype": "float32", "compressors": None, **kwargs}
+        X = zarr.create_array(str(tmp_path / store), **kwargs)
+        X[:] = data
+        return X
+
+    direct = [array("v3.zarr"), array("v2.zarr", zarr_format=2), array("group.zarr", name="a/b")]
+    others = [
+        array("zstd.zarr", compressors="auto"),
+        array("features.zarr", chunks=(700, 3)),
+        array("shards.zarr", shards=(1400, 6)),
+        array("float64.zarr", dtype="float64"),
+        array("big.zarr", serializer=zarr.codecs.BytesCodec(endian="big")),
+    ]
+    assert all(_chunk_reader(X) is not None for X in direct)
+    assert all(_chunk_reader(X) is None for X in [*others, Rows(data), data])
+    read = _chunk_reader(direct[0])
+    out = np.empty((900, 6), dtype=np.float32)
+    read(out, 650)  # across chunks
+    np.testing.assert_array_equal(out, data[650:1550])
+    direct[0][700:1400] = 0  # the fill value, of which zarr writes no chunk file
+    assert not (tmp_path / "v3.zarr" / "c" / "1" / "0").exists()
+    read(out, 650)
+    np.testing.assert_array_equal(out, np.where(np.arange(650, 1550)[:, None] // 700 == 1, 0, data[650:1550]))
+    direct[0][700:1400] = data[700:1400]
+    kwargs = {**STREAM_KWARGS, "device": device, "deterministic": True}
+    expected = SOM(**kwargs).fit(data).weights_
+    for X in [*direct, *others]:
+        np.testing.assert_array_equal(SOM(stream=True, **kwargs).fit(X).weights_, expected)
+    som = SOM(**kwargs).fit(data)
+    np.testing.assert_array_equal(som.predict(direct[0]), som.labels_)
+
+
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("fused", [True, False])
+def test_stream_not_finite_in_first_epoch(data, device, fused):
+    # without a pass of its own, the first epoch searches samples that are not finite, and raises at its end
+    X = np.tile(data, (1, 30))  # 180 features, beyond the float32 kernel's, for the tensor cores where there are
+    X[1234, 5] = np.inf
+    for n_rows in (6, 10):  # 30 and 100 nodes
+        som = SOM(**{**STREAM_KWARGS, "n_rows": n_rows, "n_cols": 10}, fused=fused, device=device, stream=True)
+        with pytest.raises(ValueError, match="NaN or infinite"):
+            som.fit(X)
+        X[1234, 5] = np.nan
+    som.fit(np.tile(data, (1, 30)))  # the device still works
+
+
 def test_distinct():
     from fastersom._som import _distinct
 
@@ -1535,15 +1588,37 @@ def test_stream_cuda_batches_bounded(data):
     assert peak <= 2 * 256 * 6 * 4 + 4096  # and the extremes of the first pass
 
 
-@pytest.mark.parametrize("init", ["random", "sample"])
-def test_stream_scan_batch_size(data, monkeypatch, init):
+def test_stream_scan_batch_size(data, monkeypatch):
     # the first pass reads batches of batch_size at most, as the epochs do off the CPU
     from fastersom._som import _Stream
 
     sizes, batches = [], _Stream.batches
     monkeypatch.setattr(_Stream, "batches", lambda self, size: sizes.append(size) or batches(self, size))
-    SOM(**{**STREAM_KWARGS, "batch_size": 100}, init=init, metric="cosine", device=CPU, stream=True).fit(data)
+    SOM(**{**STREAM_KWARGS, "batch_size": 100}, init="sample", metric="cosine", device=CPU, stream=True).fit(data)
     assert sizes[0] == 100
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "scans"),
+    [
+        ({}, 0),
+        ({"init": "pca"}, 0),
+        ({"init": "pca", "n_epochs": 0}, 0),  # which reads X, its range included
+        ({"init": "sample"}, 0),
+        ({"init": "sample", "metric": "cosine"}, 1),
+        ({"n_epochs": 0}, 1),
+    ],
+)
+def test_stream_scan_only_if_needed(data, monkeypatch, kwargs, scans):
+    # fit reads X in a pass of its own only for what the epochs need first, else the first epoch checks it is finite
+    calls, scan = [], SOM._scan
+    monkeypatch.setattr(SOM, "_scan", lambda self, stream: calls.append(1) or scan(self, stream))
+    SOM(**{**STREAM_KWARGS, **kwargs}, device=CPU, stream=True).fit(data)
+    assert len(calls) == scans
+    bad = data.copy()
+    bad[-1, 0] = np.nan
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        SOM(**{**STREAM_KWARGS, **kwargs}, device=CPU, stream=True).fit(bad)
 
 
 def test_nth_true():
