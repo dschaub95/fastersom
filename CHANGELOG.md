@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Streamed fits read their data up to 10x as fast. On an A100 at 1000 features, an 11-epoch fit of a 32 x 32 map on 4 GB
+  of an uncompressed zarr store took 4.9 s instead of 50.7 s, its epochs as fast as from a memmap or from GPU memory
+  (in memory the fit took 3.6 s, against 3.5 s before).
+  - A zarr array of uncompressed float32 in a local store, chunked along the samples only, is read straight from its
+    chunk files into the pinned buffers, without zarr's reads, which allocate and copy every chunk afresh (about
+    1 GB/s). Other zarr arrays, and chunks without a file, are read through zarr as before.
+  - On CUDA up to 8 threads, one per CPU at most, read the parts of the batches into pinned buffers of their own, which
+    overlaps reads from disk (twice as fast from a local disk as one thread) and zarr's decompression (4x as fast for
+    zstd chunks with 8 threads).
+  - `fit` no longer reads `X` once before the epochs unless they need it first (`deterministic=True`, or
+    `init="sample"` under cosine and correlation, or `n_epochs=0`): its first epoch checks that `X` is finite, and
+    raises at its end.
+
 ## 0.8.0 (2026-11-04)
 
 - New keyword-only parameters choose the neighbourhood of the batch update, with formulas in the new user guide page
