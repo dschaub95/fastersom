@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `transform`, and with it `transform_batches` and `fit_transform`, now gives samples without a BMU (zero-norm samples
+  under cosine, constant samples under correlation) distance NaN to every node instead of 1, as `predict` does for the
+  distance to their BMU, so that 1 is no longer mistaken for a valid distance (issue #26). Take their labels from
+  `predict`: `transform(X).argmin(1)` still gives 0 for them, as NumPy's `argmin` returns the position of the first NaN.
+
 ## 0.8.1 (2026-11-05)
 
 - Streamed fits read their data up to 10x as fast. On an A100 at 1000 features, an 11-epoch fit of a 32 x 32 map on 4 GB
