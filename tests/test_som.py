@@ -534,7 +534,7 @@ def test_rows_without_bmu(data, metric, constant):
     )
     transformed = som.transform(invalid)
     assert np.isnan(transformed[::10]).all()
-    assert np.isfinite(np.delete(transformed, slice(None, None, 10), axis=0)).all()
+    np.testing.assert_allclose(np.delete(transformed, slice(None, None, 10), axis=0), ref.transform(valid), atol=1e-6)
     assert som.quantization_error(invalid) == pytest.approx(ref.quantization_error(valid), rel=1e-6)
     assert som.topographic_error(invalid) == pytest.approx(ref.topographic_error(valid), rel=1e-6)
 
