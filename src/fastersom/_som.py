@@ -628,8 +628,8 @@ class SOM:
         (1 - Pearson correlation, the cosine distance of vectors centred over the features). Every metric updates
         the nodes to the neighbourhood-weighted mean of the raw samples (not the median for manhattan, nor the
         centred samples for correlation). Zero-norm samples under cosine and constant samples under correlation
-        have no BMU: they get label -1, are excluded from the update and the error measures, and have distance 1
-        to every node in transform.
+        have no BMU: they get label -1, are excluded from the update and the error measures, and have distance
+        NaN to every node in transform.
     random_state
         Seed for the initialisation.
     device
@@ -1604,7 +1604,7 @@ class SOM:
         distances = self._score_distances(batch, self._scores(batch, self._weights))
         has_bmu = self._has_bmu(batch)
         if has_bmu is not None:
-            distances[~has_bmu] = 1
+            distances[~has_bmu] = torch.nan
         return distances
 
     def transform_batches(
@@ -1642,7 +1642,7 @@ class SOM:
     def transform(self, X: ArrayLike | torch.Tensor, out: Any = None) -> Any:
         """Returns the distance of every sample to every node, shape (n_samples, n_nodes).
 
-        Distances in the metric; 1 for samples without a BMU. Without out, a dense n_samples x n_nodes float32 array
+        Distances in the metric; NaN for samples without a BMU. Without out, a dense n_samples x n_nodes float32 array
         on the host. out, a writable array of shape (n_samples, n_nodes) that takes ``out[i:j] = rows``, such as a
         numpy array or memmap, an h5py or zarr dataset or a tensor on any device, receives the distances of each batch
         of transform_batches instead, and is returned, so that with a memmap or dataset they need not fit in memory.

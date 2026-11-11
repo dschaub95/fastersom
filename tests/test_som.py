@@ -532,7 +532,9 @@ def test_rows_without_bmu(data, metric, constant):
     np.testing.assert_allclose(
         np.delete(distances, slice(None, None, 10)), ref.predict(valid, return_distance=True)[1], atol=1e-6
     )
-    np.testing.assert_array_equal(som.transform(invalid)[::10], 1)
+    transformed = som.transform(invalid)
+    assert np.isnan(transformed[::10]).all()
+    np.testing.assert_allclose(np.delete(transformed, slice(None, None, 10), axis=0), ref.transform(valid), atol=1e-6)
     assert som.quantization_error(invalid) == pytest.approx(ref.quantization_error(valid), rel=1e-6)
     assert som.topographic_error(invalid) == pytest.approx(ref.topographic_error(valid), rel=1e-6)
 
@@ -1474,6 +1476,7 @@ def test_transform_batches_and_out(data, tmp_path, device, metric):
     X[::10] = 0  # without a BMU under cosine and correlation
     som = SOM(**STREAM_KWARGS, metric=metric, device=device).fit(X)
     expected = som.transform(X)
+    assert np.isnan(expected[::10]).all() == (metric in ("cosine", "correlation"))
     batches = list(som.transform_batches(X))  # of batch_size 512, as transform's
     assert [start for start, _ in batches] == list(range(0, 5000, 512))
     for _, distances in batches:
