@@ -7,7 +7,7 @@ fastersom is a fast batch self-organising map (SOM) in PyTorch for GPU (CUDA, MP
   feature branch, for read-only tasks, and for edits the user asks for on the current checkout. Remove the worktree
   once its branch is merged.
 - Run the tests with `hatch test` and build the docs with `hatch run docs:build`.
-- The commit hooks run through prek and call hatch: install both with `uv tool install prek hatch`.
+- The commit hooks run through prek and call hatch: install both with `uv tool install prek` and `uv tool install hatch`.
 - CI runs on CPUs only and the CUDA and Metal kernel tests skip without a GPU: run them on a GPU after changing the
   kernels.
 - Describe user-facing changes under "Unreleased" in `CHANGELOG.md`.
