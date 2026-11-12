@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (2026-11-12)
 
 - The fused CUDA kernels set Triton's FP fusion at launch instead of leaving it to Triton's default: Triton 3.9 warns
   about the default, and where warnings are errors the warning disabled the kernels.
