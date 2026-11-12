@@ -1,7 +1,6 @@
 # Notes for agents working on this repository
 
-README.md introduces the package; `docs/contributing.md` explains the development setup, tests, documentation and
-releases.
+fastersom is a fast batch self-organising map (SOM) in PyTorch for GPU (CUDA, MPS) and CPU.
 
 ## Development
 
