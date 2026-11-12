@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The fused CUDA kernels set Triton's FP fusion at launch instead of leaving it to Triton's default, which keeps their
+  results the same under Triton 3.10 (whose default turns it off) and avoids Triton 3.9's warning about the default,
+  which disabled the kernels where warnings are errors.
+
 - `transform`, and with it `transform_batches` and `fit_transform`, now gives samples without a BMU (zero-norm samples
   under cosine, constant samples under correlation) distance NaN to every node instead of 1, as `predict` does for the
   distance to their BMU, so that 1 is no longer mistaken for a valid distance (issue #26). Take their labels from

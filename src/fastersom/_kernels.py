@@ -33,6 +33,9 @@ BLOCK_M, BLOCK_N = (s * t * w for s, t, w in zip(*_TILING, strict=True))
 _LAYOUT = gl.BlockedLayout(*map(list, _TILING), [1, 0])  # built once, as building it per launch takes about 20 us
 _TC_BLOCK = 128  # samples and nodes per tile of the tensor-core kernel, with 8 warps
 _PAD = 128  # samples and nodes are padded to a multiple of every tile
+# fused multiply-adds, Triton's default until 3.10 (which turns them off, and from 3.9 warns when a launch leaves it to
+# the default): set at every launch, so that the kernels compute the same scores under every Triton
+_FP_FUSION = True
 # features per chunk of the tensor-core kernel at least: Triton before 3.8 takes dots of float32 over 16 or more only
 _TC_MIN_K = 8 if tuple(map(int, triton.__version__.split(".")[:2])) >= (3, 8) else 16
 # features per chunk of the tensor-core loop at most, per device: 32, or 16 where the pipeline buffers of chunks of 32
@@ -307,6 +310,7 @@ def _padded(x: torch.Tensor, centre: torch.Tensor | None, tensor_cores: bool, no
             out.stride(0),
             centre is not None,
             tensor_cores,
+            enable_fp_fusion=_FP_FUSION,
         )
     return out
 
@@ -331,6 +335,7 @@ def _tc_launch(grid: tuple[int, int], args: tuple, split_nodes: int, largest: in
         top2,
         _TC_BLOCK,
         num_warps=8,
+        enable_fp_fusion=_FP_FUSION,
     )
 
 
@@ -388,6 +393,7 @@ def _bmus(
                 BLOCK_N,
                 _LAYOUT,
                 num_warps=4,
+                enable_fp_fusion=_FP_FUSION,
             )
     if not top2:
         return bmu.bitwise_and_(0xFFFFFFFF)
