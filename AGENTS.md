@@ -2,22 +2,12 @@
 
 fastersom is a fast batch self-organising map (SOM) in PyTorch for GPU (CUDA, MPS) and CPU.
 
-## Development
-
-- If you are not already on a feature branch or in a worktree, make changes on a new branch in a new worktree
-  rather than on `main`: `git worktree add .claude/worktrees/<branch> -b <branch> origin/main` (the folder is
-  gitignored). Branch from an up-to-date `main` unless the work builds on another branch.
-- Read-only tasks, and edits the user asks for on the current checkout, need no new branch.
-- Remove the worktree (`git worktree remove`) once its branch is merged.
-
-## Checks
-
-- Run the tests with `hatch test` (or `uv run pytest`), and build the documentation with `hatch run docs:build`.
-- Commits run the hooks in `.pre-commit-config.yaml` through prek; the mypy hook calls `hatch check types`, so `prek`
-  and `hatch` must be installed (e.g. `uv tool install prek hatch`).
-- The tests of the fused CUDA and Metal kernels skip without a suitable GPU, and CI runs on CPUs only: run them on an
-  NVIDIA or Apple GPU after changing the kernels.
-
-## Changelog
-
+- Make changes on a new branch in a new worktree, branched from an up-to-date `main`:
+  `git worktree add .claude/worktrees/<branch> -b <branch> origin/main` (gitignored). Skip this when already on a
+  feature branch, for read-only tasks, and for edits the user asks for on the current checkout. Remove the worktree
+  once its branch is merged.
+- Run the tests with `hatch test` and build the docs with `hatch run docs:build`.
+- The commit hooks run through prek and call hatch: install both with `uv tool install prek hatch`.
+- CI runs on CPUs only and the CUDA and Metal kernel tests skip without a GPU: run them on a GPU after changing the
+  kernels.
 - Describe user-facing changes under "Unreleased" in `CHANGELOG.md`.
