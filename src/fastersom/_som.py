@@ -82,8 +82,9 @@ def _tensor_cores(capability: tuple[int, int], n_features: int) -> bool:
 _FAILED: set[tuple[torch.device, str]] = set()  # kernels that failed their self-check on a device
 _PRECISIONS = ("float32", "float16")
 # samples whose BMUs the CPU adds in one index_add_ (see SOM._sums_cpu), and their largest number of values: each
-# part is copied by the selection of the samples with a BMU, 64 MB per copy at most unless a batch is larger
-_CPU_SUM_ROWS = 1 << 20
+# part is copied by the selection of the samples with a BMU, 64 MB per copy at most unless a batch is larger. _SUM_ROWS
+# also bounds the samples that fit sums per node in one float32 sum (see _add_per_node)
+_SUM_ROWS = 1 << 20
 _CPU_SUM_VALUES = 1 << 24
 # float32 values per pinned host buffer (64 MB) through which stream=True copies batches to CUDA; a larger batch arrives
 # in several copies
@@ -308,6 +309,30 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
     elif device.type == "mps":
         torch.mps.synchronize()
+
+
+def _add_per_node(
+    sums: torch.Tensor, compensation: torch.Tensor, bmus: torch.Tensor, values: torch.Tensor, one_hot: bool = False
+) -> None:
+    """Add each sample of values (float32) to the row of sums given by its BMU, in parts of up to _SUM_ROWS samples.
+
+    Each part is summed in float32 (by index_add_, or with one_hot by a one-hot matrix product, whose order is fixed),
+    which rounds away a value once a node's sum reaches 2^24 times it, and the parts' sums are added in float64 sums,
+    or, with a compensation (on MPS, which has no float64), as a Kahan pair of float32 sums and compensation.
+    """
+    part_sums = None if one_hot else values.new_empty(sums.shape)
+    for rows, part in zip(bmus.split(_SUM_ROWS), values.split(_SUM_ROWS), strict=True):
+        if part_sums is None:
+            added = part.new_zeros(len(sums), len(rows)).scatter_(0, rows[None], 1.0) @ part
+        else:
+            added = part_sums.zero_().index_add_(0, rows, part)
+        if compensation.numel() == 0:
+            sums += added
+        else:
+            added = added.sub_(compensation)
+            total = sums + added
+            compensation.copy_(total - sums).sub_(added)  # what total rounded away of added, with the opposite sign
+            sums.copy_(total)
 
 
 def _to_host(parts: Iterable[tuple[torch.Tensor, ...]], outputs: tuple[torch.Tensor, ...]) -> None:
@@ -1421,23 +1446,23 @@ class SOM:
         n_nodes: int,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sum the samples per node on the CPU, in parts of up to _CPU_SUM_ROWS samples and _CPU_SUM_VALUES values.
+        """Sum the samples per node on the CPU, in parts of up to _SUM_ROWS samples and _CPU_SUM_VALUES values.
 
         Unlike fit's loop on other devices, each part's BMUs are found batch by batch and its samples added in one
         index_add_: on the CPU, index_add_ spreads over the threads only for many rows, and adding batch by batch takes
         several times as long. A part is at least one batch, whose copies the BMU search makes anyway.
         """
-        sums = torch.zeros((n_nodes, data.shape[1]), dtype=torch.float32, device=self._device)
+        sums = torch.zeros((n_nodes, data.shape[1]), dtype=torch.float64, device=self._device)
         counts = torch.zeros(n_nodes, dtype=torch.long, device=self._device)
-        rows = max(batch_size, min(_CPU_SUM_ROWS, _CPU_SUM_VALUES // data.shape[1]))
+        rows = max(batch_size, min(_SUM_ROWS, _CPU_SUM_VALUES // data.shape[1]))
         for part in self._batches(data, rows):
             bmus = torch.cat([search(batch) for batch in part.split(batch_size)])
             keep = self._has_bmu(part)
             if keep is not None:
                 part, bmus = part[keep], bmus[keep]
-            sums.index_add_(0, bmus, part)
+            _add_per_node(sums, sums.new_empty(0), bmus, part)
             counts += torch.bincount(bmus, minlength=n_nodes)
-        return sums, counts
+        return sums.float(), counts
 
     def fit(self, X: ArrayLike | torch.Tensor, y: object = None) -> "SOM":
         """Fits the map, starting from the initialisation given by init.
@@ -1520,8 +1545,11 @@ class SOM:
             if self._device.type == "cpu":  # always deterministic, so deterministic is False there
                 sums, counts = self._sums_cpu(data, search, n_nodes, batch_size)
             else:
-                sums = torch.zeros_like(weights, dtype=torch.long if fixed_point else None)
-                lows = torch.zeros_like(sums) if fixed_point else sums.new_empty(0)  # (empty without fixed point)
+                # without fixed point, float64 sums, or on MPS float32 sums with a compensation (see _add_per_node)
+                sums = torch.zeros_like(
+                    weights, dtype=torch.long if fixed_point else torch.float32 if mps else torch.float64
+                )
+                lows = torch.zeros_like(sums) if fixed_point or mps else sums.new_empty(0)  # (the compensation on MPS)
                 # int32 on MPS, whose index_add_ in torch 2.8 takes no int64 source
                 counts = torch.zeros(n_nodes, dtype=torch.int32 if mps else torch.long, device=weights.device)
                 for batch in self._batches(data, batch_size):
@@ -1538,10 +1566,8 @@ class SOM:
                             sums.index_add_(0, rows, high.long())
                             lows.index_add_(0, rows, value.sub_(high).mul_(2.0**low_shift).round_().long())
                             del value, high  # before the next part's copies
-                    elif deterministic:  # on MPS without the Metal kernels a matrix product, in a fixed order
-                        sums += batch.new_zeros(n_nodes, len(bmus)).scatter_(0, bmus[None], 1.0) @ batch
-                    else:
-                        sums.index_add_(0, bmus, batch)
+                    else:  # on MPS without the Metal kernels, deterministic sums take a matrix product, in a fixed order
+                        _add_per_node(sums, lows, bmus, batch, one_hot=deterministic)
                     counts.index_add_(
                         0, bmus, torch.ones_like(bmus, dtype=counts.dtype) if keep is None else keep.to(counts.dtype)
                     )
@@ -1549,6 +1575,8 @@ class SOM:
                     sums = (sums.float() + lows.float() * 2.0**-low_shift) * 2.0**-low_shift * factors[0] * factors[1]
                 elif fixed_point:
                     sums = (sums / scale + lows / (scale * 2.0**low_shift)).float()
+                else:
+                    sums = sums.float()
             smoothed = smooth(torch.cat([sums, counts[:, None].float()], 1))
             numerator, denominator = smoothed[:, :-1], smoothed[:, -1:]
             weights = torch.where(denominator > 0, numerator / denominator, weights)
