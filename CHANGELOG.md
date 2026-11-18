@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `fit` no longer pulls a node towards 0 once it gets more than about 2^24 / mean samples in an epoch (about 3·10^7 for
+  values in [0, 1); issue #49). The float32 sum of each node's samples stopped growing once it reached about 2^24 times
+  the values (2^24 for values in [0, 1)), while their count kept growing. `fit` now sums the samples in float32 in parts
+  of up to 2^20 samples, and adds the parts in float64. MPS has no float64, so there it adds them as a compensated
+  (Kahan) pair of float32 sums. `deterministic=True` on CUDA, and on MPS with the Metal kernels, already summed exactly
+  in fixed point.
+
 ## 0.9.0 (2026-11-12)
 
 - The fused CUDA kernels set Triton's FP fusion at launch instead of leaving it to Triton's default: Triton 3.9 warns

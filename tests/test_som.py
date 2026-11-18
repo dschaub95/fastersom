@@ -740,6 +740,23 @@ def test_deterministic_keeps_small_values(device):
     assert som.weights_[0, 0] == pytest.approx(1)
 
 
+@pytest.mark.parametrize("device", [CPU, *GPUS])
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_sums_keep_values_beyond_float32(device, deterministic, monkeypatch):
+    # in one float32 sum, each 1 added to 2^24 rounds away (issue #49), as it would for a node with more than 2^24
+    # samples; the sums of parts of a sample each are added in float64 (on MPS, a compensated pair of float32 sums)
+    from fastersom import _som
+
+    monkeypatch.setattr(_som, "_SUM_ROWS", 1)
+    X = np.ones((1024, 1), np.float32)
+    X[0] = 2**24
+    for fused in (True, False):  # on MPS without the Metal kernels, deterministic sums take a matrix product
+        som = SOM(
+            1, 1, n_epochs=1, sigma_initial=0.01, init=[[1]], device=device, deterministic=deterministic, fused=fused
+        ).fit(X)
+        assert som.weights_[0, 0] == pytest.approx((2**24 + 1023) / 1024, rel=1e-7)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
     som = SOM(5, 4, n_epochs=2, random_state=0, device="cuda").fit(data)
@@ -1317,7 +1334,7 @@ def test_stream_inputs(data, tmp_path, monkeypatch):
     # the CPU's sums in parts of several batches, the last one shorter
     from fastersom import _som
 
-    monkeypatch.setattr(_som, "_CPU_SUM_ROWS", 1300)
+    monkeypatch.setattr(_som, "_SUM_ROWS", 1300)
     np.testing.assert_array_equal(
         SOM(**STREAM_KWARGS, device=CPU, stream=True).fit(data).weights_,
         SOM(**STREAM_KWARGS, device=CPU).fit(data).weights_,
