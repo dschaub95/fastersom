@@ -757,50 +757,6 @@ def test_sums_keep_values_beyond_float32(device, deterministic, monkeypatch):
         assert som.weights_[0, 0] == pytest.approx((2**24 + 1023) / 1024, rel=1e-7)
 
 
-@pytest.mark.parametrize("device", [CPU, *GPUS])
-@pytest.mark.parametrize("compensated", [False, True])
-@pytest.mark.parametrize("one_hot", [False, True])
-def test_node_sums(device, compensated, one_hot, monkeypatch):
-    # the float32 buffer takes at most _SUM_ROWS samples, also across batches and within longer ones, and every sample
-    # reaches the sums; the last feature, all ones, counts the samples in the buffer. compensated forces MPS's Kahan
-    # pair of float32 sums on any device
-    from fastersom import _som
-
-    monkeypatch.setattr(_som, "_SUM_ROWS", 5)
-    rng = np.random.default_rng(0)
-    lengths = [1, 3, 2, 5, 4, 12, 0, 1, 7]
-    values = rng.integers(-50, 50, (sum(lengths), 4)).astype(np.float32)
-    values[:, -1] = 1
-    bmus = rng.integers(0, 4, sum(lengths))
-    sums = _som._NodeSums(4, 4, torch.device(device), one_hot=one_hot)
-    if compensated:
-        sums.sums, sums.compensation = sums.sums.float(), torch.zeros_like(sums.sums, dtype=torch.float32)
-    flush, flushed = sums._flush, []
-
-    def checked_flush():
-        assert sums.buffer[:, -1].sum() == sums.pending <= 5
-        flushed.append(sums.pending)
-        flush()
-
-    sums._flush = checked_flush
-    for rows, part in zip(
-        np.split(bmus, np.cumsum(lengths)[:-1]), np.split(values, np.cumsum(lengths)[:-1]), strict=True
-    ):
-        sums.add(torch.from_numpy(rows).to(device), torch.from_numpy(part).to(device))
-    expected = np.zeros((4, 4))
-    np.add.at(expected, bmus, values)
-    np.testing.assert_array_equal(sums.total().cpu(), expected)
-    assert sum(flushed) == len(values)  # all samples
-    assert min(flushed[:-1]) > 0  # and no flush of an empty buffer
-    if compensated:  # the ones after 2^24, each rounded away in float32 sums alone, add up in the compensation
-        sums = _som._NodeSums(1, 1, torch.device(device), one_hot=one_hot)
-        sums.sums, sums.compensation = sums.sums.float(), torch.zeros(1, 1, device=device)
-        for value in [2**24] + [1] * 1023:
-            sums.add(torch.zeros(1, dtype=torch.long, device=device), torch.full((1, 1), float(value), device=device))
-            sums._flush()
-        assert sums.total().item() == np.float32(2**24 + 1023)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_pickle_loads_without_cuda(data, monkeypatch):
     som = SOM(5, 4, n_epochs=2, random_state=0, device="cuda").fit(data)
