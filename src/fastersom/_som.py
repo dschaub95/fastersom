@@ -320,9 +320,9 @@ def _add_per_node(
     which rounds away a value once a node's sum reaches 2^24 times it, and the parts' sums are added in float64 sums,
     or, with a compensation (on MPS, which has no float64), as a Kahan pair of float32 sums and compensation.
     """
-    part_sums = None if one_hot else values.new_empty(sums.shape)
+    part_sums = values.new_empty(0 if one_hot else sums.shape)
     for rows, part in zip(bmus.split(_SUM_ROWS), values.split(_SUM_ROWS), strict=True):
-        if part_sums is None:
+        if one_hot:
             added = part.new_zeros(len(sums), len(rows)).scatter_(0, rows[None], 1.0) @ part
         else:
             added = part_sums.zero_().index_add_(0, rows, part)
