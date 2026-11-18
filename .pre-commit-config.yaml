@@ -10,7 +10,9 @@ repos:
     rev: v2.6.6
     hooks:
       - id: biome-format
-        exclude: ^\.cruft\.json$ # inconsistent indentation with cruft - file never to be modified manually.
+        # .cruft.json: inconsistent indentation with cruft - file never to be modified manually.
+        # YAML: biome >= 2.6.6 formats it despite `yaml.formatter.enabled: false` in biome.jsonc.
+        exclude: ^\.cruft\.json$|\.ya?ml$
         groups: [format]
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: v2.30.6
