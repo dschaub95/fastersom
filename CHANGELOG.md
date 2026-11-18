@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1 (2026-11-18)
 
 - `fit` no longer pulls a node towards 0 once it gets more than about 2^24 / mean samples in an epoch (about 3·10^7 for
   values in [0, 1); issue #49). The float32 sum of each node's samples stopped growing once it reached about 2^24 times
